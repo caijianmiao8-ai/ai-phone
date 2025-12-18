@@ -28,3 +28,6 @@ Thumbs.db
 adb/*.exe
 adb/*.dll
 *.log
+
+# 复制的 phone_agent 模块（打包时自动生成）
+phone_agent/

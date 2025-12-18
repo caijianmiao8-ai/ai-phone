@@ -12,13 +12,17 @@ PROJECT_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_PATH not in sys.path:
     sys.path.insert(0, PROJECT_PATH)
 
-# 添加原项目路径到sys.path
-ORIGINAL_PROJECT_PATH = os.path.join(
-    os.path.dirname(PROJECT_PATH),
-    "Open-AutoGLM-main"
-)
-if os.path.exists(ORIGINAL_PROJECT_PATH) and ORIGINAL_PROJECT_PATH not in sys.path:
-    sys.path.insert(0, ORIGINAL_PROJECT_PATH)
+# 检查本地是否有 phone_agent 模块（打包后或复制后的情况）
+LOCAL_PHONE_AGENT = os.path.join(PROJECT_PATH, "phone_agent")
+
+# 如果本地没有，则从原项目路径查找
+if not os.path.exists(LOCAL_PHONE_AGENT):
+    ORIGINAL_PROJECT_PATH = os.path.join(
+        os.path.dirname(PROJECT_PATH),
+        "Open-AutoGLM-main"
+    )
+    if os.path.exists(ORIGINAL_PROJECT_PATH) and ORIGINAL_PROJECT_PATH not in sys.path:
+        sys.path.insert(0, ORIGINAL_PROJECT_PATH)
 
 from knowledge_base.manager import KnowledgeManager, KnowledgeItem
 
