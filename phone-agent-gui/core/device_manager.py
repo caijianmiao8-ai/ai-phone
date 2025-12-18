@@ -186,3 +186,206 @@ class DeviceManager:
                 info[key] = output.strip()
 
         return info
+
+    # ==================== 远程操作功能 ====================
+
+    def get_screen_size(self, device_id: str = None) -> Tuple[int, int]:
+        """获取屏幕分辨率"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "wm", "size"])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            match = re.search(r"(\d+)x(\d+)", output)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+        return 1080, 1920  # 默认分辨率
+
+    def tap(self, x: int, y: int, device_id: str = None) -> Tuple[bool, str]:
+        """点击屏幕指定坐标"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "input", "tap", str(x), str(y)])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, f"点击 ({x}, {y})"
+        return False, output or "点击失败"
+
+    def swipe(self, x1: int, y1: int, x2: int, y2: int,
+              duration: int = 300, device_id: str = None) -> Tuple[bool, str]:
+        """滑动屏幕"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "input", "swipe",
+                    str(x1), str(y1), str(x2), str(y2), str(duration)])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, f"滑动 ({x1},{y1}) -> ({x2},{y2})"
+        return False, output or "滑动失败"
+
+    def long_press(self, x: int, y: int, duration: int = 1000,
+                   device_id: str = None) -> Tuple[bool, str]:
+        """长按屏幕"""
+        # 长按实际上是原地滑动
+        return self.swipe(x, y, x, y, duration, device_id)
+
+    def input_text(self, text: str, device_id: str = None) -> Tuple[bool, str]:
+        """输入文本（需要先聚焦输入框）"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        # 使用 ADB Keyboard 广播方式输入（支持中文）
+        args.extend(["shell", "am", "broadcast", "-a",
+                    "ADB_INPUT_TEXT", "--es", "msg", text])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, f"已输入文本"
+        # 如果 ADB Keyboard 不可用，回退到基础输入（仅英文）
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        # 转义特殊字符
+        escaped_text = text.replace(" ", "%s").replace("&", "\\&").replace("<", "\\<").replace(">", "\\>")
+        args.extend(["shell", "input", "text", escaped_text])
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, f"已输入文本 (基础模式)"
+        return False, output or "输入失败"
+
+    def press_key(self, keycode: str, device_id: str = None) -> Tuple[bool, str]:
+        """按下按键"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "input", "keyevent", keycode])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, f"按键 {keycode}"
+        return False, output or "按键失败"
+
+    def press_back(self, device_id: str = None) -> Tuple[bool, str]:
+        """返回键"""
+        return self.press_key("KEYCODE_BACK", device_id)
+
+    def press_home(self, device_id: str = None) -> Tuple[bool, str]:
+        """主页键"""
+        return self.press_key("KEYCODE_HOME", device_id)
+
+    def press_recent(self, device_id: str = None) -> Tuple[bool, str]:
+        """最近任务键"""
+        return self.press_key("KEYCODE_APP_SWITCH", device_id)
+
+    def press_enter(self, device_id: str = None) -> Tuple[bool, str]:
+        """回车键"""
+        return self.press_key("KEYCODE_ENTER", device_id)
+
+    def install_apk(self, apk_path: str, device_id: str = None) -> Tuple[bool, str]:
+        """安装APK"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["install", "-r", apk_path])
+
+        success, output = self.adb_helper.run_command(args, timeout=60)
+        if success and "Success" in output:
+            return True, "安装成功"
+        return False, output or "安装失败"
+
+    def install_apk_from_url(self, url: str, device_id: str = None) -> Tuple[bool, str]:
+        """从URL下载并安装APK"""
+        import tempfile
+        import urllib.request
+
+        try:
+            # 下载APK到临时文件
+            with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as f:
+                urllib.request.urlretrieve(url, f.name)
+                return self.install_apk(f.name, device_id)
+        except Exception as e:
+            return False, f"下载失败: {str(e)}"
+
+    def open_settings(self, device_id: str = None) -> Tuple[bool, str]:
+        """打开系统设置"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "am", "start", "-a", "android.settings.SETTINGS"])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, "已打开设置"
+        return False, output or "打开失败"
+
+    def open_language_settings(self, device_id: str = None) -> Tuple[bool, str]:
+        """打开语言和输入法设置"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "am", "start", "-a",
+                    "android.settings.INPUT_METHOD_SETTINGS"])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, "已打开输入法设置"
+        return False, output or "打开失败"
+
+    def set_ime(self, ime_id: str, device_id: str = None) -> Tuple[bool, str]:
+        """设置当前输入法"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "ime", "set", ime_id])
+
+        success, output = self.adb_helper.run_command(args)
+        if success:
+            return True, f"已切换输入法: {ime_id}"
+        return False, output or "切换失败"
+
+    def enable_adb_keyboard(self, device_id: str = None) -> Tuple[bool, str]:
+        """启用ADB Keyboard输入法"""
+        # 先启用
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "ime", "enable", "com.android.adbkeyboard/.AdbIME"])
+        self.adb_helper.run_command(args)
+
+        # 再设置为当前输入法
+        return self.set_ime("com.android.adbkeyboard/.AdbIME", device_id)
+
+    def list_ime(self, device_id: str = None) -> Tuple[bool, str]:
+        """列出所有输入法"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", "ime", "list", "-a"])
+
+        return self.adb_helper.run_command(args)
+
+    def run_shell_command(self, command: str, device_id: str = None) -> Tuple[bool, str]:
+        """执行自定义shell命令"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        args.extend(["shell", command])
+
+        return self.adb_helper.run_command(args, timeout=30)
+
+    def run_adb_command(self, command: str, device_id: str = None) -> Tuple[bool, str]:
+        """执行自定义ADB命令"""
+        args = []
+        if device_id:
+            args.extend(["-s", device_id])
+        # 解析命令字符串为参数列表
+        cmd_parts = command.split()
+        args.extend(cmd_parts)
+
+        return self.adb_helper.run_command(args, timeout=30)
