@@ -385,7 +385,6 @@ def create_app() -> gr.Blocks:
 
     with gr.Blocks(
         title="Phone Agent - AI手机助手",
-        theme=gr.themes.Soft(),
     ) as app:
         gr.Markdown(
             """
@@ -762,4 +761,5 @@ def launch_app(share: bool = False, server_port: int = 7860):
         share=share,
         server_port=server_port,
         show_error=True,
+        theme=gr.themes.Soft(),
     )
