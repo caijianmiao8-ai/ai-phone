@@ -135,25 +135,33 @@ class AgentWrapper:
             return False
 
     def _enhance_task_with_knowledge(self, task: str) -> Tuple[str, Optional[KnowledgeItem]]:
-        """使用知识库增强任务描述"""
+        """使用知识库增强任务描述，支持多条匹配"""
         if not self.use_knowledge_base or not self.knowledge_manager:
             return task, None
 
-        # 搜索匹配的知识
-        matched_item = self.knowledge_manager.get_best_match(task)
+        # 搜索匹配的知识（按相关度排序）
+        matches = self.knowledge_manager.search(task)
+        if not matches:
+            return task, None
 
-        if matched_item:
-            self._log(f"知识库匹配: {matched_item.title}")
-            # 构建增强后的任务描述
-            enhanced_task = f"""{task}
+        # 取前3条匹配内容以避免上下文过长
+        top_matches = matches[:3]
+        titles = [item.title for item in top_matches]
+        self._log(f"知识库匹配: {', '.join(titles)}")
 
-[参考操作指南 - {matched_item.title}]:
-{matched_item.content}
+        guides = []
+        for idx, item in enumerate(top_matches, start=1):
+            guides.append(f"[{idx}] {item.title}\n{item.content}")
+
+        enhanced_task = f"""{task}
+
+[参考操作指南]:
+{chr(10).join(guides)}
 
 请参考以上指南执行任务，但要根据实际屏幕内容灵活调整。"""
-            return enhanced_task, matched_item
 
-        return task, None
+        # 返回第一条用于向前端记录“使用了哪些知识”
+        return enhanced_task, top_matches[0]
 
     def test_api_connection(self) -> Tuple[bool, str]:
         """测试API连接"""
