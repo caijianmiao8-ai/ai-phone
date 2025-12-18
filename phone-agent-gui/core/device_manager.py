@@ -288,13 +288,22 @@ class DeviceManager:
         return self.press_key("KEYCODE_ENTER", device_id)
 
     def install_apk(self, apk_path: str, device_id: str = None) -> Tuple[bool, str]:
-        """安装APK"""
+        """安装APK（支持大文件，超时5分钟）"""
+        import os
         args = []
         if device_id:
             args.extend(["-s", device_id])
         args.extend(["install", "-r", apk_path])
 
-        success, output = self.adb_helper.run_command(args, timeout=60)
+        # 根据文件大小动态调整超时时间
+        # 基础60秒 + 每10MB额外30秒，最长10分钟
+        try:
+            file_size_mb = os.path.getsize(apk_path) / (1024 * 1024)
+            timeout = min(60 + int(file_size_mb / 10) * 30, 600)
+        except Exception:
+            timeout = 300  # 默认5分钟
+
+        success, output = self.adb_helper.run_command(args, timeout=timeout)
         if success and "Success" in output:
             return True, "安装成功"
         return False, output or "安装失败"
