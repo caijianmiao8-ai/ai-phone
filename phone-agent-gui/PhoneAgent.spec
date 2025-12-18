@@ -1,38 +1,72 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 PyInstaller 打包配置文件
-用于将 Phone Agent GUI 打包成 Windows 可执行文件
 """
 
 import os
 import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
 
 # 项目路径
 BASE_DIR = os.path.dirname(os.path.abspath(SPEC))
-ORIGINAL_PROJECT = os.path.join(os.path.dirname(BASE_DIR), "Open-AutoGLM-main")
+HOOKS_DIR = os.path.join(BASE_DIR, 'hooks')
 
 block_cipher = None
 
 # 收集数据文件
-datas = [
-    # ADB工具
-    (os.path.join(BASE_DIR, 'adb'), 'adb'),
-    # 配置目录
-    (os.path.join(BASE_DIR, 'config'), 'config'),
-    # 知识库数据
-    (os.path.join(BASE_DIR, 'knowledge_base', 'data'), 'knowledge_base/data'),
+datas = []
+binaries = []
+hiddenimports = []
+
+# ADB工具
+adb_dir = os.path.join(BASE_DIR, 'adb')
+if os.path.exists(adb_dir):
+    datas.append((adb_dir, 'adb'))
+
+# 配置目录
+config_dir = os.path.join(BASE_DIR, 'config')
+if os.path.exists(config_dir):
+    datas.append((config_dir, 'config'))
+
+# 知识库数据
+kb_data_dir = os.path.join(BASE_DIR, 'knowledge_base', 'data')
+if os.path.exists(kb_data_dir):
+    datas.append((kb_data_dir, 'knowledge_base/data'))
+
+# 如果本地有 phone_agent 模块
+phone_agent_path = os.path.join(BASE_DIR, 'phone_agent')
+if os.path.exists(phone_agent_path):
+    datas.append((phone_agent_path, 'phone_agent'))
+
+# 收集 Gradio 及其所有依赖的数据文件
+packages_to_collect = [
+    'gradio',
+    'gradio_client',
+    'safehttpx',
+    'groovy',
+    'tomlkit',
+    'huggingface_hub',
+    'httpx',
+    'anyio',
+    'starlette',
+    'fastapi',
+    'uvicorn',
+    'pydantic',
+    'semantic_version',
+    'aiofiles',
 ]
 
-# 如果原项目存在，也打包进去
-if os.path.exists(ORIGINAL_PROJECT):
-    datas.append(
-        (os.path.join(ORIGINAL_PROJECT, 'phone_agent'), 'phone_agent')
-    )
+for pkg in packages_to_collect:
+    try:
+        pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
+        datas += pkg_datas
+        binaries += pkg_binaries
+        hiddenimports += pkg_hiddenimports
+    except Exception as e:
+        print(f"Warning: Could not collect {pkg}: {e}")
 
-# 隐藏导入
-hiddenimports = [
-    'gradio',
-    'gradio.themes',
+# 额外的隐藏导入
+hiddenimports += [
     'PIL',
     'PIL.Image',
     'openai',
@@ -51,11 +85,11 @@ hiddenimports = [
 
 a = Analysis(
     ['main.py'],
-    pathex=[BASE_DIR, ORIGINAL_PROJECT],
-    binaries=[],
+    pathex=[BASE_DIR],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[HOOKS_DIR],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -77,13 +111,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # 无控制台窗口
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=os.path.join(BASE_DIR, 'resources', 'icon.ico') if os.path.exists(os.path.join(BASE_DIR, 'resources', 'icon.ico')) else None,
 )
 
 coll = COLLECT(

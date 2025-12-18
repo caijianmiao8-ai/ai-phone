@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 打包脚本 - 将Phone Agent GUI打包成Windows可执行文件
+会自动集成 Open-AutoGLM-main 的核心模块
 """
 import os
 import sys
@@ -14,11 +15,14 @@ DIST_DIR = os.path.join(BASE_DIR, "dist")
 BUILD_DIR = os.path.join(BASE_DIR, "build")
 ADB_DIR = os.path.join(BASE_DIR, "adb")
 
+# 原项目路径
+ORIGINAL_PROJECT = os.path.join(os.path.dirname(BASE_DIR), "Open-AutoGLM-main")
+
 
 def download_adb():
     """下载ADB工具"""
     if os.path.exists(os.path.join(ADB_DIR, "adb.exe")):
-        print("ADB工具已存在，跳过下载")
+        print("✓ ADB工具已存在")
         return True
 
     print("正在下载ADB工具...")
@@ -46,66 +50,61 @@ def download_adb():
         shutil.rmtree(platform_tools_dir, ignore_errors=True)
         os.remove(zip_path)
 
-        print("ADB工具下载完成")
+        print("✓ ADB工具下载完成")
         return True
 
     except Exception as e:
-        print(f"下载ADB失败: {e}")
-        print("请手动下载ADB工具并放置到 adb/ 目录")
+        print(f"✗ 下载ADB失败: {e}")
+        print("  请手动下载ADB工具并放置到 adb/ 目录")
         return False
+
+
+def copy_phone_agent():
+    """复制原项目的 phone_agent 模块到当前目录"""
+    src_path = os.path.join(ORIGINAL_PROJECT, "phone_agent")
+    dst_path = os.path.join(BASE_DIR, "phone_agent")
+
+    if not os.path.exists(ORIGINAL_PROJECT):
+        print(f"✗ 未找到原项目: {ORIGINAL_PROJECT}")
+        print("  请确保 Open-AutoGLM-main 文件夹与 phone-agent-gui 在同一目录下")
+        return False
+
+    if not os.path.exists(src_path):
+        print(f"✗ 未找到 phone_agent 模块: {src_path}")
+        return False
+
+    # 删除旧的复制
+    if os.path.exists(dst_path):
+        shutil.rmtree(dst_path)
+
+    # 复制模块
+    print(f"正在复制 phone_agent 模块...")
+    shutil.copytree(src_path, dst_path)
+    print("✓ phone_agent 模块复制完成")
+    return True
 
 
 def build_exe():
     """构建可执行文件"""
     print("开始构建可执行文件...")
 
-    # PyInstaller参数
-    pyinstaller_args = [
-        "pyinstaller",
-        "--name=PhoneAgent",
-        "--onedir",  # 打包成目录而非单文件，便于包含ADB工具
-        "--windowed",  # 无控制台窗口
-        "--icon=resources/icon.ico",  # 图标 (如果有)
-        f"--distpath={DIST_DIR}",
-        f"--workpath={BUILD_DIR}",
-        "--clean",
-        # 添加数据文件
-        f"--add-data=adb{os.pathsep}adb",
-        f"--add-data=knowledge_base/data{os.pathsep}knowledge_base/data",
-        f"--add-data=config{os.pathsep}config",
-        # 隐藏导入
-        "--hidden-import=gradio",
-        "--hidden-import=PIL",
-        "--hidden-import=openai",
-        # 主文件
-        "main.py",
-    ]
-
-    # 检查图标是否存在
-    icon_path = os.path.join(BASE_DIR, "resources", "icon.ico")
-    if not os.path.exists(icon_path):
-        pyinstaller_args = [arg for arg in pyinstaller_args if "icon.ico" not in arg]
+    # 使用 spec 文件打包
+    spec_file = os.path.join(BASE_DIR, "PhoneAgent.spec")
 
     try:
-        subprocess.run(pyinstaller_args, check=True)
-        print("构建完成!")
-
-        # 复制原项目文件
-        print("复制Phone Agent核心文件...")
-        original_project = os.path.join(os.path.dirname(BASE_DIR), "Open-AutoGLM-main")
-        if os.path.exists(original_project):
-            dest_project = os.path.join(DIST_DIR, "PhoneAgent", "phone_agent_core")
-            shutil.copytree(
-                os.path.join(original_project, "phone_agent"),
-                os.path.join(dest_project, "phone_agent"),
-                dirs_exist_ok=True
-            )
-
-        print(f"\n构建输出目录: {os.path.join(DIST_DIR, 'PhoneAgent')}")
+        subprocess.run(
+            ["pyinstaller", "--clean", "--noconfirm", spec_file],
+            check=True,
+            cwd=BASE_DIR
+        )
+        print("✓ 构建完成!")
         return True
 
     except subprocess.CalledProcessError as e:
-        print(f"构建失败: {e}")
+        print(f"✗ 构建失败: {e}")
+        return False
+    except FileNotFoundError:
+        print("✗ 未找到 pyinstaller，请先安装: pip install pyinstaller")
         return False
 
 
@@ -123,6 +122,7 @@ def create_readme():
 ### 2. 启动程序
 - 双击 PhoneAgent.exe 启动程序
 - 程序会自动打开浏览器访问界面
+- 默认地址: http://localhost:7860
 
 ### 3. 配置API
 - 进入「设置」页面
@@ -145,6 +145,7 @@ A: 请确保:
    1. 手机USB调试已开启
    2. 电脑已安装手机驱动
    3. USB线支持数据传输
+   4. 在手机上点击了「允许USB调试」
 
 Q: API连接失败？
 A: 请检查:
@@ -152,12 +153,23 @@ A: 请检查:
    2. 网络是否正常
    3. API地址是否正确
 
+Q: 程序闪退？
+A: 请尝试:
+   1. 以管理员身份运行
+   2. 检查是否有杀毒软件拦截
+   3. 查看同目录下的日志文件
+
 ## 获取API Key
 访问 https://open.bigmodel.cn 注册并获取API Key
 
+## 技术支持
+如有问题，请联系开发者
 """
-    with open(os.path.join(DIST_DIR, "PhoneAgent", "使用说明.txt"), "w", encoding="utf-8") as f:
-        f.write(readme_content)
+    output_dir = os.path.join(DIST_DIR, "PhoneAgent")
+    if os.path.exists(output_dir):
+        with open(os.path.join(output_dir, "使用说明.txt"), "w", encoding="utf-8") as f:
+            f.write(readme_content)
+        print("✓ 使用说明已创建")
 
 
 def main():
@@ -167,28 +179,49 @@ def main():
     print("=" * 50)
     print()
 
-    # 下载ADB
+    # 步骤1: 复制 phone_agent 模块
+    print("[1/4] 集成 phone_agent 模块...")
+    if not copy_phone_agent():
+        print("\n打包失败: 无法集成 phone_agent 模块")
+        sys.exit(1)
+
+    # 步骤2: 下载ADB
+    print("\n[2/4] 准备 ADB 工具...")
     if not download_adb():
         print("警告: ADB工具未准备好，继续打包...")
 
-    # 确保知识库数据目录存在
+    # 步骤3: 确保必要目录存在
+    print("\n[3/4] 准备资源文件...")
+
+    # 知识库数据目录
     kb_data_dir = os.path.join(BASE_DIR, "knowledge_base", "data")
     os.makedirs(kb_data_dir, exist_ok=True)
-
-    # 创建空的知识库文件
     kb_file = os.path.join(kb_data_dir, "knowledge_base.json")
     if not os.path.exists(kb_file):
         with open(kb_file, "w", encoding="utf-8") as f:
             f.write("[]")
 
-    # 构建
+    # config目录
+    config_dir = os.path.join(BASE_DIR, "config")
+    os.makedirs(config_dir, exist_ok=True)
+
+    print("✓ 资源文件准备完成")
+
+    # 步骤4: 构建
+    print("\n[4/4] 构建可执行文件...")
     if build_exe():
         create_readme()
         print()
-        print("打包完成!")
-        print(f"输出目录: {os.path.join(DIST_DIR, 'PhoneAgent')}")
+        print("=" * 50)
+        print("  打包完成!")
+        print(f"  输出目录: {os.path.join(DIST_DIR, 'PhoneAgent')}")
+        print("=" * 50)
         print()
         print("您可以将 PhoneAgent 文件夹压缩后分发给用户")
+    else:
+        print()
+        print("打包失败，请检查错误信息")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

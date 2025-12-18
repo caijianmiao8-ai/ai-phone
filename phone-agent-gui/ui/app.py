@@ -42,24 +42,20 @@ app_state = AppState()
 
 # ==================== 设备管理面板 ====================
 
-def scan_devices() -> str:
-    """扫描设备"""
+def scan_devices():
+    """扫描设备并更新下拉框"""
     devices = app_state.device_manager.scan_devices()
     if not devices:
-        return "未发现设备。请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
+        result_text = "未发现设备。请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
+        choices = []
+    else:
+        result_text = "发现以下设备:\n\n"
+        for d in devices:
+            status_icon = "✅" if d.is_online else "❌"
+            result_text += f"{status_icon} {d.display_name} - {d.status_text}\n"
+        choices = [d.device_id for d in app_state.device_manager.get_online_devices()]
 
-    result = "发现以下设备:\n\n"
-    for d in devices:
-        status_icon = "✅" if d.is_online else "❌"
-        result += f"{status_icon} {d.display_name} - {d.status_text}\n"
-
-    return result
-
-
-def get_device_choices() -> List[str]:
-    """获取设备选项列表"""
-    devices = app_state.device_manager.get_online_devices()
-    return [d.device_id for d in devices]
+    return result_text, gr.update(choices=choices, value=None)
 
 
 def select_device(device_id: str) -> str:
@@ -79,10 +75,10 @@ Android版本: {info.get('android_version', '未知')}
 SDK版本: {info.get('sdk_version', '未知')}"""
 
 
-def connect_wifi(ip_address: str) -> str:
+def connect_wifi(ip_address: str):
     """WiFi连接设备"""
     if not ip_address:
-        return "请输入IP地址"
+        return "请输入IP地址", gr.update()
 
     # 清理IP地址
     ip_address = ip_address.strip()
@@ -92,7 +88,11 @@ def connect_wifi(ip_address: str) -> str:
     ip, port = ip_address.rsplit(":", 1)
     success, message = app_state.device_manager.connect_remote(ip, int(port))
 
-    return message
+    # 更新设备列表
+    devices = app_state.device_manager.get_online_devices()
+    choices = [d.device_id for d in devices]
+
+    return message, gr.update(choices=choices, value=None)
 
 
 def disconnect_device() -> str:
@@ -116,50 +116,47 @@ def refresh_screenshot() -> Optional[Image.Image]:
 
 # ==================== 知识库管理面板 ====================
 
-def get_knowledge_list() -> str:
-    """获取知识库列表"""
+def get_knowledge_list_and_choices():
+    """获取知识库列表和下拉选项"""
     items = app_state.knowledge_manager.get_all()
+
     if not items:
-        return "知识库为空，点击「创建默认模板」添加示例"
+        list_text = "知识库为空，点击「创建默认模板」添加示例"
+        choices = []
+    else:
+        list_text = ""
+        for item in items:
+            keywords = ", ".join(item.keywords[:3])
+            if len(item.keywords) > 3:
+                keywords += "..."
+            list_text += f"📄 **{item.title}** (ID: {item.id})\n"
+            list_text += f"   触发词: {keywords}\n\n"
+        choices = [item.id for item in items]
 
-    result = ""
-    for item in items:
-        keywords = ", ".join(item.keywords[:3])
-        if len(item.keywords) > 3:
-            keywords += "..."
-        result += f"📄 **{item.title}** (ID: {item.id})\n"
-        result += f"   触发词: {keywords}\n\n"
-
-    return result
-
-
-def get_knowledge_choices() -> List[Tuple[str, str]]:
-    """获取知识库选项"""
-    items = app_state.knowledge_manager.get_all()
-    return [(f"{item.title} ({item.id})", item.id) for item in items]
+    return list_text, gr.update(choices=choices, value=None)
 
 
-def load_knowledge_item(item_id: str) -> Tuple[str, str, str]:
+def load_knowledge_item(item_id: str) -> Tuple[str, str, str, str]:
     """加载知识条目到编辑区"""
     if not item_id:
-        return "", "", ""
+        return "", "", "", ""
 
     item = app_state.knowledge_manager.get(item_id)
     if not item:
-        return "", "", ""
+        return "", "", "", ""
 
-    return item.title, ", ".join(item.keywords), item.content
+    return item.id, item.title, ", ".join(item.keywords), item.content
 
 
-def save_knowledge_item(item_id: str, title: str, keywords: str, content: str) -> str:
+def save_knowledge_item(item_id: str, title: str, keywords: str, content: str):
     """保存知识条目"""
     if not title or not content:
-        return "标题和内容不能为空"
+        return "标题和内容不能为空", gr.update(), gr.update()
 
     # 解析关键词
     keyword_list = [k.strip() for k in keywords.split(",") if k.strip()]
     if not keyword_list:
-        return "请至少添加一个触发词"
+        return "请至少添加一个触发词", gr.update(), gr.update()
 
     if item_id:
         # 更新现有条目
@@ -167,14 +164,19 @@ def save_knowledge_item(item_id: str, title: str, keywords: str, content: str) -
             item_id, title=title, keywords=keyword_list, content=content
         )
         if item:
-            return f"已更新: {title}"
-        return "更新失败，条目不存在"
+            status = f"已更新: {title}"
+        else:
+            status = "更新失败，条目不存在"
     else:
         # 创建新条目
         item = app_state.knowledge_manager.create(
             title=title, keywords=keyword_list, content=content
         )
-        return f"已创建: {title} (ID: {item.id})"
+        status = f"已创建: {title} (ID: {item.id})"
+
+    # 刷新列表
+    list_text, dropdown_update = get_knowledge_list_and_choices()
+    return status, list_text, dropdown_update
 
 
 def create_new_knowledge() -> Tuple[str, str, str, str]:
@@ -182,21 +184,27 @@ def create_new_knowledge() -> Tuple[str, str, str, str]:
     return "", "", "", ""
 
 
-def delete_knowledge_item(item_id: str) -> str:
+def delete_knowledge_item(item_id: str):
     """删除知识条目"""
     if not item_id:
-        return "请先选择要删除的条目"
+        return "请先选择要删除的条目", gr.update(), gr.update()
 
     success = app_state.knowledge_manager.delete(item_id)
     if success:
-        return "删除成功"
-    return "删除失败，条目不存在"
+        status = "删除成功"
+    else:
+        status = "删除失败，条目不存在"
+
+    # 刷新列表
+    list_text, dropdown_update = get_knowledge_list_and_choices()
+    return status, list_text, dropdown_update
 
 
-def create_default_templates() -> str:
+def create_default_templates():
     """创建默认模板"""
     app_state.knowledge_manager.create_default_templates()
-    return "已创建默认模板"
+    list_text, dropdown_update = get_knowledge_list_and_choices()
+    return "已创建默认模板", list_text, dropdown_update
 
 
 def export_knowledge(filepath: str) -> str:
@@ -210,15 +218,16 @@ def export_knowledge(filepath: str) -> str:
         return f"导出失败: {str(e)}"
 
 
-def import_knowledge(file) -> str:
+def import_knowledge(file):
     """导入知识库"""
     if file is None:
-        return "请选择文件"
+        return "请选择文件", gr.update(), gr.update()
     try:
         count = app_state.knowledge_manager.import_from_file(file.name)
-        return f"成功导入 {count} 条知识"
+        list_text, dropdown_update = get_knowledge_list_and_choices()
+        return f"成功导入 {count} 条知识", list_text, dropdown_update
     except Exception as e:
-        return f"导入失败: {str(e)}"
+        return f"导入失败: {str(e)}", gr.update(), gr.update()
 
 
 # ==================== 任务执行面板 ====================
@@ -375,11 +384,6 @@ def create_app() -> gr.Blocks:
     with gr.Blocks(
         title="Phone Agent - AI手机助手",
         theme=gr.themes.Soft(),
-        css="""
-        .status-running { color: #22c55e; font-weight: bold; }
-        .status-idle { color: #6b7280; }
-        .log-area { font-family: monospace; font-size: 12px; }
-        """
     ) as app:
         gr.Markdown(
             """
@@ -406,6 +410,7 @@ def create_app() -> gr.Blocks:
                             label="选择设备",
                             choices=[],
                             interactive=True,
+                            allow_custom_value=True,
                         )
                         select_btn = gr.Button("选择此设备")
                         device_info = gr.Textbox(
@@ -439,10 +444,7 @@ def create_app() -> gr.Blocks:
                 # 事件绑定
                 scan_btn.click(
                     fn=scan_devices,
-                    outputs=[device_list],
-                ).then(
-                    fn=get_device_choices,
-                    outputs=[device_dropdown],
+                    outputs=[device_list, device_dropdown],
                 )
 
                 select_btn.click(
@@ -457,10 +459,7 @@ def create_app() -> gr.Blocks:
                 connect_btn.click(
                     fn=connect_wifi,
                     inputs=[wifi_ip],
-                    outputs=[wifi_status],
-                ).then(
-                    fn=get_device_choices,
-                    outputs=[device_dropdown],
+                    outputs=[wifi_status, device_dropdown],
                 )
 
                 disconnect_btn.click(
@@ -486,6 +485,7 @@ def create_app() -> gr.Blocks:
                             label="选择条目编辑",
                             choices=[],
                             interactive=True,
+                            allow_custom_value=True,
                         )
                         with gr.Row():
                             new_kb_btn = gr.Button("➕ 新建")
@@ -516,22 +516,15 @@ def create_app() -> gr.Blocks:
                         save_status = gr.Textbox(label="保存状态", interactive=False)
 
                 # 事件绑定
-                def refresh_knowledge_ui():
-                    return get_knowledge_list(), get_knowledge_choices()
-
                 refresh_kb_btn.click(
-                    fn=refresh_knowledge_ui,
+                    fn=get_knowledge_list_and_choices,
                     outputs=[knowledge_list_display, knowledge_dropdown],
                 )
 
                 knowledge_dropdown.change(
                     fn=load_knowledge_item,
                     inputs=[knowledge_dropdown],
-                    outputs=[kb_title, kb_keywords, kb_content],
-                ).then(
-                    fn=lambda x: x,
-                    inputs=[knowledge_dropdown],
-                    outputs=[kb_id],
+                    outputs=[kb_id, kb_title, kb_keywords, kb_content],
                 )
 
                 new_kb_btn.click(
@@ -542,19 +535,13 @@ def create_app() -> gr.Blocks:
                 save_kb_btn.click(
                     fn=save_knowledge_item,
                     inputs=[kb_id, kb_title, kb_keywords, kb_content],
-                    outputs=[save_status],
-                ).then(
-                    fn=refresh_knowledge_ui,
-                    outputs=[knowledge_list_display, knowledge_dropdown],
+                    outputs=[save_status, knowledge_list_display, knowledge_dropdown],
                 )
 
                 delete_kb_btn.click(
                     fn=delete_knowledge_item,
                     inputs=[kb_id],
-                    outputs=[save_status],
-                ).then(
-                    fn=refresh_knowledge_ui,
-                    outputs=[knowledge_list_display, knowledge_dropdown],
+                    outputs=[save_status, knowledge_list_display, knowledge_dropdown],
                 ).then(
                     fn=create_new_knowledge,
                     outputs=[kb_id, kb_title, kb_keywords, kb_content],
@@ -562,10 +549,7 @@ def create_app() -> gr.Blocks:
 
                 create_template_btn.click(
                     fn=create_default_templates,
-                    outputs=[import_export_status],
-                ).then(
-                    fn=refresh_knowledge_ui,
-                    outputs=[knowledge_list_display, knowledge_dropdown],
+                    outputs=[import_export_status, knowledge_list_display, knowledge_dropdown],
                 )
 
                 export_btn.click(
@@ -576,15 +560,12 @@ def create_app() -> gr.Blocks:
                 import_file.change(
                     fn=import_knowledge,
                     inputs=[import_file],
-                    outputs=[import_export_status],
-                ).then(
-                    fn=refresh_knowledge_ui,
-                    outputs=[knowledge_list_display, knowledge_dropdown],
+                    outputs=[import_export_status, knowledge_list_display, knowledge_dropdown],
                 )
 
                 # 初始加载
                 app.load(
-                    fn=refresh_knowledge_ui,
+                    fn=get_knowledge_list_and_choices,
                     outputs=[knowledge_list_display, knowledge_dropdown],
                 )
 
@@ -617,7 +598,6 @@ def create_app() -> gr.Blocks:
                             label="",
                             lines=15,
                             interactive=False,
-                            elem_classes=["log-area"],
                         )
                         refresh_log_btn = gr.Button("🔄 刷新日志")
 
@@ -651,9 +631,6 @@ def create_app() -> gr.Blocks:
                     fn=get_task_screenshot,
                     outputs=[task_screenshot],
                 )
-
-                # 定时刷新状态和日志
-                # (Gradio 4.x 中需要用不同方式实现，这里简化处理)
 
             # ============ 设置 Tab ============
             with gr.Tab("⚙️ 设置"):
