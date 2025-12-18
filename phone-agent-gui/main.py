@@ -5,6 +5,8 @@ Phone Agent GUI - AI手机助手
 """
 import os
 import sys
+import socket
+import gradio as gr
 
 # 设置项目路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,9 +77,28 @@ def main():
     # 设置环境
     setup_environment()
 
+    def is_port_available(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            return s.connect_ex(("0.0.0.0", port)) != 0
+
+    def find_available_port(preferred: int, max_tries: int = 20) -> int:
+        if is_port_available(preferred):
+            return preferred
+
+        for offset in range(1, max_tries + 1):
+            candidate = preferred + offset
+            if is_port_available(candidate):
+                print(f"端口 {preferred} 被占用，自动切换到可用端口 {candidate}")
+                return candidate
+
+        raise OSError(f"在 {preferred}-{preferred + max_tries} 范围内未找到可用端口")
+
+    server_port = find_available_port(args.port)
+
     print()
     print(f"启动服务...")
-    print(f"访问地址: http://localhost:{args.port}")
+    print(f"访问地址: http://localhost:{server_port}")
     print()
 
     # 启动UI
@@ -86,9 +107,10 @@ def main():
     app = create_app()
     app.launch(
         share=args.share,
-        server_port=args.port,
+        server_port=server_port,
         inbrowser=not args.no_browser,
         show_error=True,
+        theme=gr.themes.Soft(),
     )
 
 

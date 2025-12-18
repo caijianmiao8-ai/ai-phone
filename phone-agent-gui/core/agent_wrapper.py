@@ -4,6 +4,7 @@ Agent包装器模块
 """
 import sys
 import os
+import base64
 from typing import Optional, Callable, Generator, Tuple
 from dataclasses import dataclass
 
@@ -55,10 +56,11 @@ class AgentWrapper:
         self,
         api_base_url: str,
         api_key: str,
-        model_name: str = "autoglm-phone-9b",
+        model_name: str = "autoglm-phone",
         max_tokens: int = 3000,
         temperature: float = 0.1,
         device_id: Optional[str] = None,
+        device_type: str = "adb",
         max_steps: int = 50,
         language: str = "cn",
         verbose: bool = True,
@@ -66,11 +68,12 @@ class AgentWrapper:
         use_knowledge_base: bool = True,
     ):
         self.api_base_url = api_base_url
-        self.api_key = api_key
+        self.api_key = (api_key or "").strip()
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.device_id = device_id
+        self.device_type = device_type
         self.max_steps = max_steps
         self.language = language
         self.verbose = verbose
@@ -94,7 +97,14 @@ class AgentWrapper:
         """初始化原始Agent"""
         try:
             from phone_agent import PhoneAgent
-            from phone_agent.agent import ModelConfig, AgentConfig
+            from phone_agent.agent import AgentConfig
+            from phone_agent.model import ModelConfig
+            from phone_agent.device_factory import set_device_type, DeviceType
+
+            if (self.device_type or "").lower() == DeviceType.HDC.value:
+                set_device_type(DeviceType.HDC)
+            else:
+                set_device_type(DeviceType.ADB)
 
             model_config = ModelConfig(
                 base_url=self.api_base_url,
@@ -125,34 +135,46 @@ class AgentWrapper:
             return False
 
     def _enhance_task_with_knowledge(self, task: str) -> Tuple[str, Optional[KnowledgeItem]]:
-        """使用知识库增强任务描述"""
+        """使用知识库增强任务描述，支持多条匹配"""
         if not self.use_knowledge_base or not self.knowledge_manager:
             return task, None
 
-        # 搜索匹配的知识
-        matched_item = self.knowledge_manager.get_best_match(task)
+        # 搜索匹配的知识（按相关度排序）
+        matches = self.knowledge_manager.search(task)
+        if not matches:
+            return task, None
 
-        if matched_item:
-            self._log(f"知识库匹配: {matched_item.title}")
-            # 构建增强后的任务描述
-            enhanced_task = f"""{task}
+        # 取前3条匹配内容以避免上下文过长
+        top_matches = matches[:3]
+        titles = [item.title for item in top_matches]
+        self._log(f"知识库匹配: {', '.join(titles)}")
 
-[参考操作指南 - {matched_item.title}]:
-{matched_item.content}
+        guides = []
+        for idx, item in enumerate(top_matches, start=1):
+            guides.append(f"[{idx}] {item.title}\n{item.content}")
+
+        enhanced_task = f"""{task}
+
+[参考操作指南]:
+{chr(10).join(guides)}
 
 请参考以上指南执行任务，但要根据实际屏幕内容灵活调整。"""
-            return enhanced_task, matched_item
 
-        return task, None
+        # 返回第一条用于向前端记录“使用了哪些知识”
+        return enhanced_task, top_matches[0]
 
     def test_api_connection(self) -> Tuple[bool, str]:
         """测试API连接"""
         try:
             from openai import OpenAI
 
+            api_key = (self.api_key or "").strip()
+            if not api_key:
+                return False, "API Key 不能为空"
+
             client = OpenAI(
                 base_url=self.api_base_url,
-                api_key=self.api_key or "test-key",
+                api_key=api_key,
             )
 
             # 简单测试请求
@@ -220,12 +242,12 @@ class AgentWrapper:
                     # 获取截图
                     screenshot = None
                     try:
-                        from phone_agent.device_factory import DeviceFactory
-                        factory = DeviceFactory.get_instance()
-                        screenshot_obj = factory.get_screenshot()
-                        if screenshot_obj and screenshot_obj.data:
-                            import base64
-                            screenshot = base64.b64decode(screenshot_obj.data)
+                        from phone_agent.device_factory import get_device_factory
+
+                        factory = get_device_factory()
+                        screenshot_obj = factory.get_screenshot(self.device_id)
+                        if screenshot_obj and screenshot_obj.base64_data:
+                            screenshot = base64.b64decode(screenshot_obj.base64_data)
                     except Exception:
                         pass
 

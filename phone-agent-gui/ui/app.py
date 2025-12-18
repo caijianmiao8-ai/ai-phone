@@ -7,7 +7,7 @@ import threading
 import time
 import io
 from PIL import Image
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Generator
 
 from config.settings import Settings, get_settings, save_settings
 from knowledge_base.manager import KnowledgeManager, KnowledgeItem
@@ -232,16 +232,30 @@ def import_knowledge(file):
 
 # ==================== 任务执行面板 ====================
 
-def run_task(task: str, use_knowledge: bool) -> Tuple[str, Optional[Image.Image]]:
-    """执行任务"""
+def run_task(task: str, use_knowledge: bool) -> Generator[Tuple[str, Optional[Image.Image], str], None, None]:
+    """执行任务，实时返回状态/截图/日志"""
+    def make_logs_text() -> str:
+        return "\n".join(app_state.task_logs) if app_state.task_logs else "暂无日志"
+
+    def bytes_to_image(data: Optional[bytes]) -> Optional[Image.Image]:
+        if not data:
+            return None
+        try:
+            return Image.open(io.BytesIO(data))
+        except Exception:
+            return None
+
     if not task:
-        return "请输入任务描述", None
+        yield "请输入任务描述", None, make_logs_text()
+        return
 
     if not app_state.current_device:
-        return "请先选择一个设备", None
+        yield "请先选择一个设备", None, make_logs_text()
+        return
 
     if app_state.is_task_running:
-        return "已有任务在执行中", None
+        yield "已有任务在执行中", None, make_logs_text()
+        return
 
     # 清空日志
     app_state.task_logs = []
@@ -256,6 +270,7 @@ def run_task(task: str, use_knowledge: bool) -> Tuple[str, Optional[Image.Image]
         max_tokens=settings.max_tokens,
         temperature=settings.temperature,
         device_id=app_state.current_device,
+        device_type=settings.device_type,
         max_steps=settings.max_steps,
         language=settings.language,
         verbose=settings.verbose,
@@ -264,23 +279,40 @@ def run_task(task: str, use_knowledge: bool) -> Tuple[str, Optional[Image.Image]
     )
     app_state.agent.on_log_callback = app_state.add_log
 
-    # 在后台线程执行任务
+    # 执行任务（同步生成器，逐步yield实时结果）
     app_state.is_task_running = True
 
-    def execute():
-        try:
-            for step_result in app_state.agent.run_task(task):
-                if step_result.screenshot:
-                    app_state.current_screenshot = step_result.screenshot
-        except Exception as e:
-            app_state.add_log(f"任务执行错误: {str(e)}")
-        finally:
-            app_state.is_task_running = False
+    def make_status(prefix: str) -> str:
+        return prefix
 
-    thread = threading.Thread(target=execute, daemon=True)
-    thread.start()
+    # 初始状态
+    yield make_status("🔄 任务执行中..."), bytes_to_image(app_state.current_screenshot), make_logs_text()
 
-    return "任务已开始执行，请查看日志区域", None
+    task_gen = app_state.agent.run_task(task)
+    task_result = None
+
+    try:
+        while True:
+            step_result = next(task_gen)
+            if step_result.screenshot:
+                app_state.current_screenshot = step_result.screenshot
+
+            status_text = "✅ 任务完成" if step_result.finished else "🔄 任务执行中..."
+            yield status_text, bytes_to_image(app_state.current_screenshot), make_logs_text()
+    except StopIteration as stop:
+        task_result = stop.value
+    except Exception as e:
+        app_state.add_log(f"任务执行错误: {str(e)}")
+        yield "任务执行错误", bytes_to_image(app_state.current_screenshot), make_logs_text()
+    finally:
+        app_state.is_task_running = False
+
+    # 结束状态
+    final_status = "⏹️ 已停止" if app_state.agent and app_state.agent._should_stop else "✅ 任务完成"
+    if task_result and not task_result.success:
+        final_status = f"❌ {task_result.message}"
+
+    yield final_status, bytes_to_image(app_state.current_screenshot), make_logs_text()
 
 
 def stop_task() -> str:
@@ -363,6 +395,7 @@ def test_api() -> str:
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
         model_name=settings.model_name,
+        device_type=settings.device_type,
     )
     success, message = agent.test_api_connection()
     return f"{'✅' if success else '❌'} {message}"
@@ -383,7 +416,6 @@ def create_app() -> gr.Blocks:
 
     with gr.Blocks(
         title="Phone Agent - AI手机助手",
-        theme=gr.themes.Soft(),
     ) as app:
         gr.Markdown(
             """
@@ -614,7 +646,7 @@ def create_app() -> gr.Blocks:
                 run_btn.click(
                     fn=run_task,
                     inputs=[task_input, use_kb_checkbox],
-                    outputs=[task_status, task_screenshot],
+                    outputs=[task_status, task_screenshot, log_area],
                 )
 
                 stop_btn.click(
@@ -648,7 +680,7 @@ def create_app() -> gr.Blocks:
                         )
                         model_name = gr.Textbox(
                             label="模型名称",
-                            placeholder="autoglm-phone-9b",
+                            placeholder="autoglm-phone",
                         )
                         with gr.Row():
                             max_tokens = gr.Number(label="最大Token数", value=3000)
@@ -760,4 +792,5 @@ def launch_app(share: bool = False, server_port: int = 7860):
         share=share,
         server_port=server_port,
         show_error=True,
+        theme=gr.themes.Soft(),
     )
