@@ -42,6 +42,7 @@ class Settings:
     # 设备配置
     device_id: Optional[str] = None
     device_type: str = "adb"  # adb 或 hdc
+    last_wifi_address: str = ""
 
     # 执行配置
     max_steps: int = 50
