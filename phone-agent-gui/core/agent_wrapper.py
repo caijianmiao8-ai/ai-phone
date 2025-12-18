@@ -4,6 +4,7 @@ Agent包装器模块
 """
 import sys
 import os
+import base64
 from typing import Optional, Callable, Generator, Tuple
 from dataclasses import dataclass
 
@@ -59,6 +60,7 @@ class AgentWrapper:
         max_tokens: int = 3000,
         temperature: float = 0.1,
         device_id: Optional[str] = None,
+        device_type: str = "adb",
         max_steps: int = 50,
         language: str = "cn",
         verbose: bool = True,
@@ -71,6 +73,7 @@ class AgentWrapper:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.device_id = device_id
+        self.device_type = device_type
         self.max_steps = max_steps
         self.language = language
         self.verbose = verbose
@@ -94,7 +97,14 @@ class AgentWrapper:
         """初始化原始Agent"""
         try:
             from phone_agent import PhoneAgent
-            from phone_agent.agent import ModelConfig, AgentConfig
+            from phone_agent.agent import AgentConfig
+            from phone_agent.model import ModelConfig
+            from phone_agent.device_factory import set_device_type, DeviceType
+
+            if (self.device_type or "").lower() == DeviceType.HDC.value:
+                set_device_type(DeviceType.HDC)
+            else:
+                set_device_type(DeviceType.ADB)
 
             model_config = ModelConfig(
                 base_url=self.api_base_url,
@@ -220,12 +230,12 @@ class AgentWrapper:
                     # 获取截图
                     screenshot = None
                     try:
-                        from phone_agent.device_factory import DeviceFactory
-                        factory = DeviceFactory.get_instance()
-                        screenshot_obj = factory.get_screenshot()
-                        if screenshot_obj and screenshot_obj.data:
-                            import base64
-                            screenshot = base64.b64decode(screenshot_obj.data)
+                        from phone_agent.device_factory import get_device_factory
+
+                        factory = get_device_factory()
+                        screenshot_obj = factory.get_screenshot(self.device_id)
+                        if screenshot_obj and screenshot_obj.base64_data:
+                            screenshot = base64.b64decode(screenshot_obj.base64_data)
                     except Exception:
                         pass
 
