@@ -56,7 +56,7 @@ class AgentWrapper:
         self,
         api_base_url: str,
         api_key: str,
-        model_name: str = "autoglm-phone-9b",
+        model_name: str = "autoglm-phone",
         max_tokens: int = 3000,
         temperature: float = 0.1,
         device_id: Optional[str] = None,

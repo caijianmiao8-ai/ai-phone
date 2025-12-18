@@ -649,7 +649,7 @@ def create_app() -> gr.Blocks:
                         )
                         model_name = gr.Textbox(
                             label="模型名称",
-                            placeholder="autoglm-phone-9b",
+                            placeholder="autoglm-phone",
                         )
                         with gr.Row():
                             max_tokens = gr.Number(label="最大Token数", value=3000)
