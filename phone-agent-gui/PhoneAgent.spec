@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 PyInstaller 打包配置文件
-用于将 Phone Agent GUI 打包成 Windows 可执行文件
 """
 
 import os
 import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
 
 # 项目路径
 BASE_DIR = os.path.dirname(os.path.abspath(SPEC))
@@ -15,6 +15,8 @@ block_cipher = None
 
 # 收集数据文件
 datas = []
+binaries = []
+hiddenimports = []
 
 # ADB工具
 adb_dir = os.path.join(BASE_DIR, 'adb')
@@ -31,21 +33,43 @@ kb_data_dir = os.path.join(BASE_DIR, 'knowledge_base', 'data')
 if os.path.exists(kb_data_dir):
     datas.append((kb_data_dir, 'knowledge_base/data'))
 
-# 如果本地有 phone_agent 模块，打包进去
+# 如果本地有 phone_agent 模块
 phone_agent_path = os.path.join(BASE_DIR, 'phone_agent')
 if os.path.exists(phone_agent_path):
     datas.append((phone_agent_path, 'phone_agent'))
 
-# 隐藏导入
-hiddenimports = [
+# 收集 Gradio 及其所有依赖的数据文件
+packages_to_collect = [
     'gradio',
-    'gradio.themes',
     'gradio_client',
+    'safehttpx',
+    'groovy',
+    'tomlkit',
+    'huggingface_hub',
+    'httpx',
+    'anyio',
+    'starlette',
+    'fastapi',
+    'uvicorn',
+    'pydantic',
+    'semantic_version',
+    'aiofiles',
+]
+
+for pkg in packages_to_collect:
+    try:
+        pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
+        datas += pkg_datas
+        binaries += pkg_binaries
+        hiddenimports += pkg_hiddenimports
+    except Exception as e:
+        print(f"Warning: Could not collect {pkg}: {e}")
+
+# 额外的隐藏导入
+hiddenimports += [
     'PIL',
     'PIL.Image',
     'openai',
-    'httpx',
-    'safehttpx',
     'json',
     'threading',
     'dataclasses',
@@ -62,10 +86,10 @@ hiddenimports = [
 a = Analysis(
     ['main.py'],
     pathex=[BASE_DIR],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[HOOKS_DIR],  # 使用自定义 hooks 目录
+    hookspath=[HOOKS_DIR],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -87,7 +111,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,  # 开启控制台以便查看日志
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
