@@ -57,7 +57,9 @@ class AppState:
         self.device_manager = DeviceManager(self.adb_helper)
         self.knowledge_manager = KnowledgeManager()
         self.agent: Optional[AgentWrapper] = None
-        self.current_device: Optional[str] = None
+        self.current_device: Optional[str] = self.settings.device_id
+        if self.current_device:
+            self.device_manager.set_current_device(self.current_device)
         self.is_task_running = False
         self.task_logs: List[str] = []
         self.current_screenshot: Optional[bytes] = None
@@ -88,7 +90,8 @@ def scan_devices():
             result_text += f"{status_icon} {d.display_name} - {d.status_text}\n"
         choices = [d.device_id for d in app_state.device_manager.get_online_devices()]
 
-    return result_text, gr.update(choices=choices, value=None)
+    selected_value = app_state.current_device if app_state.current_device in choices else None
+    return result_text, gr.update(choices=choices, value=selected_value)
 
 
 def select_device(device_id: str) -> str:
@@ -98,6 +101,8 @@ def select_device(device_id: str) -> str:
 
     app_state.current_device = device_id
     app_state.device_manager.set_current_device(device_id)
+    app_state.settings.device_id = device_id
+    save_settings(app_state.settings)
 
     # 获取设备详细信息
     info = app_state.device_manager.get_device_info_detail(device_id)
@@ -120,6 +125,9 @@ def connect_wifi(ip_address: str):
 
     ip, port = ip_address.rsplit(":", 1)
     success, message = app_state.device_manager.connect_remote(ip, int(port))
+    if success:
+        app_state.settings.last_wifi_address = ip_address
+        save_settings(app_state.settings)
 
     # 更新设备列表
     devices = app_state.device_manager.get_online_devices()
@@ -705,6 +713,7 @@ def create_app() -> gr.Blocks:
                             choices=[],
                             interactive=True,
                             allow_custom_value=True,
+                            value=app_state.current_device,
                         )
                         select_btn = gr.Button("选择此设备")
                         device_info = gr.Textbox(
@@ -717,6 +726,7 @@ def create_app() -> gr.Blocks:
                         wifi_ip = gr.Textbox(
                             label="IP地址",
                             placeholder="192.168.1.100:5555",
+                            value=app_state.settings.last_wifi_address,
                         )
                         with gr.Row():
                             connect_btn = gr.Button("连接")
@@ -940,6 +950,12 @@ def create_app() -> gr.Blocks:
                     outputs=[cmd_output],
                 )
 
+                # 初始加载设备列表
+                app.load(
+                    fn=scan_devices,
+                    outputs=[device_list, device_dropdown],
+                )
+
             # ============ 知识库管理 Tab ============
             with gr.Tab("📚 知识库"):
                 with gr.Row():
@@ -1108,24 +1124,30 @@ def create_app() -> gr.Blocks:
                         api_base_url = gr.Textbox(
                             label="API地址",
                             placeholder="https://open.bigmodel.cn/api/paas/v4",
+                            value=app_state.settings.api_base_url,
                         )
                         api_key = gr.Textbox(
                             label="API Key",
                             type="password",
                             placeholder="your-api-key",
+                            value=app_state.settings.api_key,
                         )
                         model_name = gr.Textbox(
                             label="模型名称",
                             placeholder="autoglm-phone",
+                            value=app_state.settings.model_name,
                         )
                         with gr.Row():
-                            max_tokens = gr.Number(label="最大Token数", value=3000)
+                            max_tokens = gr.Number(
+                                label="最大Token数",
+                                value=app_state.settings.max_tokens,
+                            )
                             temperature = gr.Slider(
                                 label="Temperature",
                                 minimum=0,
                                 maximum=1,
                                 step=0.1,
-                                value=0.1,
+                                value=app_state.settings.temperature,
                             )
                         test_api_btn = gr.Button("🔗 测试API连接")
                         api_status = gr.Textbox(label="API状态", interactive=False)
