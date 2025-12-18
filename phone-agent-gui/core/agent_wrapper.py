@@ -135,32 +135,54 @@ class AgentWrapper:
             return False
 
     def _enhance_task_with_knowledge(self, task: str) -> Tuple[str, Optional[KnowledgeItem]]:
-        """使用知识库增强任务描述，支持多条匹配"""
+        """使用知识库增强任务描述，支持多条匹配，AI完整阅读并自主判断"""
         if not self.use_knowledge_base or not self.knowledge_manager:
             return task, None
 
         # 搜索匹配的知识（按相关度排序）
         matches = self.knowledge_manager.search(task)
         if not matches:
-            return task, None
+            # 没有精确匹配时，提供所有知识库条目供 AI 参考
+            all_items = self.knowledge_manager.get_all()
+            if all_items:
+                self._log(f"无精确匹配，提供全部 {len(all_items)} 条知识库参考")
+                matches = all_items[:5]  # 最多5条避免上下文过长
+            else:
+                return task, None
 
-        # 取前3条匹配内容以避免上下文过长
-        top_matches = matches[:3]
+        # 取相关度最高的条目（最多5条）
+        top_matches = matches[:5]
         titles = [item.title for item in top_matches]
         self._log(f"知识库匹配: {', '.join(titles)}")
 
+        # 构建完整的知识库内容供 AI 阅读
         guides = []
         for idx, item in enumerate(top_matches, start=1):
-            guides.append(f"[{idx}] {item.title}\n{item.content}")
+            # 提供完整内容，让 AI 自行判断使用哪部分
+            guide_text = f"""=== 参考指南 {idx}: {item.title} ===
+关键词: {', '.join(item.keywords)}
+
+{item.content}
+"""
+            guides.append(guide_text)
 
         enhanced_task = f"""{task}
 
-[参考操作指南]:
+=====================================
+[知识库参考资料 - 请完整阅读并自行判断使用]
+=====================================
+
 {chr(10).join(guides)}
 
-请参考以上指南执行任务，但要根据实际屏幕内容灵活调整。"""
+=====================================
+[使用说明]
+- 以上是相关的参考资料，请完整阅读全部内容
+- 根据当前任务和屏幕内容，自行判断使用哪些参考信息
+- 如果参考资料中有多个选项/示例，请根据实际情况选择最合适的
+- 参考资料仅供参考，请根据实际屏幕内容灵活调整操作
+====================================="""
 
-        # 返回第一条用于向前端记录“使用了哪些知识”
+        # 返回第一条用于向前端记录"使用了哪些知识"
         return enhanced_task, top_matches[0]
 
     def test_api_connection(self) -> Tuple[bool, str]:

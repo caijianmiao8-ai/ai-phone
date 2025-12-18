@@ -788,6 +788,8 @@ def create_app() -> gr.Blocks:
 def launch_app(share: bool = False, server_port: int = 7860):
     """启动应用"""
     app = create_app()
+    # 启用队列以支持实时流式输出
+    app.queue(max_size=20)
     app.launch(
         share=share,
         server_port=server_port,

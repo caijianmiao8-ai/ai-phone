@@ -39,20 +39,87 @@ class KnowledgeItem:
         return cls(**data)
 
     def matches(self, query: str) -> bool:
-        """检查查询是否匹配此条目的关键词"""
+        """检查查询是否匹配此条目（双向匹配：关键词和内容）"""
         query_lower = query.lower()
+
+        # 1. 关键词在查询中（原逻辑）
         for keyword in self.keywords:
             if keyword.lower() in query_lower:
                 return True
+
+        # 2. 查询词在关键词中（反向匹配）
+        query_words = self._extract_words(query_lower)
+        for word in query_words:
+            if len(word) >= 2:  # 忽略单字符
+                for keyword in self.keywords:
+                    if word in keyword.lower():
+                        return True
+
+        # 3. 查询词在标题中
+        title_lower = self.title.lower()
+        for word in query_words:
+            if len(word) >= 2 and word in title_lower:
+                return True
+
+        # 4. 查询词在内容中（模糊匹配）
+        content_lower = self.content.lower()
+        for word in query_words:
+            if len(word) >= 2 and word in content_lower:
+                return True
+
         return False
 
-    def get_relevance_score(self, query: str) -> int:
-        """计算查询与此条目的相关度分数"""
+    def _extract_words(self, text: str) -> List[str]:
+        """提取文本中的词语（支持中英文）"""
+        # 英文单词
+        english_words = re.findall(r'[a-zA-Z]+', text)
+        # 中文词语（简单分词：连续中文字符，2-4字为词）
+        chinese_chars = re.findall(r'[\u4e00-\u9fff]+', text)
+        chinese_words = []
+        for chars in chinese_chars:
+            # 提取2-4字的中文词
+            if len(chars) >= 2:
+                for i in range(len(chars) - 1):
+                    chinese_words.append(chars[i:i+2])
+                    if i + 3 <= len(chars):
+                        chinese_words.append(chars[i:i+3])
+                    if i + 4 <= len(chars):
+                        chinese_words.append(chars[i:i+4])
+        return english_words + chinese_words
+
+    def get_relevance_score(self, query: str) -> float:
+        """计算查询与此条目的相关度分数（加权算法）"""
         query_lower = query.lower()
-        score = 0
+        query_words = self._extract_words(query_lower)
+        score = 0.0
+
+        # 1. 关键词精确匹配（权重最高：10分/个）
         for keyword in self.keywords:
             if keyword.lower() in query_lower:
-                score += 1
+                score += 10.0
+
+        # 2. 标题匹配（权重高：5分/词）
+        title_lower = self.title.lower()
+        for word in query_words:
+            if len(word) >= 2 and word in title_lower:
+                score += 5.0
+
+        # 3. 内容匹配（权重中：1分/词，上限10分）
+        content_lower = self.content.lower()
+        content_score = 0.0
+        for word in query_words:
+            if len(word) >= 2 and word in content_lower:
+                content_score += 1.0
+        score += min(content_score, 10.0)
+
+        # 4. 查询词被关键词包含（权重中：3分/个）
+        for word in query_words:
+            if len(word) >= 2:
+                for keyword in self.keywords:
+                    if word in keyword.lower():
+                        score += 3.0
+                        break
+
         return score
 
 
