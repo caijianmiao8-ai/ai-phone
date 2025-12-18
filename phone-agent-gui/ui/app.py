@@ -6,6 +6,9 @@ import gradio as gr
 import threading
 import time
 import io
+import os
+import shutil
+import tempfile
 from PIL import Image
 from typing import Optional, List, Tuple, Generator
 
@@ -14,6 +17,36 @@ from knowledge_base.manager import KnowledgeManager, KnowledgeItem
 from core.device_manager import DeviceManager, DeviceInfo
 from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper
+
+
+# 配置 Gradio 缓存目录
+GRADIO_CACHE_DIR = os.path.join(tempfile.gettempdir(), "phone_agent_gradio_cache")
+
+
+def clear_gradio_cache():
+    """清理 Gradio 缓存目录"""
+    try:
+        # 清理自定义缓存目录
+        if os.path.exists(GRADIO_CACHE_DIR):
+            shutil.rmtree(GRADIO_CACHE_DIR, ignore_errors=True)
+            os.makedirs(GRADIO_CACHE_DIR, exist_ok=True)
+
+        # 清理默认 Gradio 缓存
+        default_cache = os.path.join(tempfile.gettempdir(), "gradio")
+        if os.path.exists(default_cache):
+            # 只删除超过1小时的文件
+            now = time.time()
+            for root, dirs, files in os.walk(default_cache):
+                for f in files:
+                    filepath = os.path.join(root, f)
+                    try:
+                        if now - os.path.getmtime(filepath) > 3600:  # 1小时
+                            os.remove(filepath)
+                    except Exception:
+                        pass
+        return True
+    except Exception:
+        return False
 
 
 # 全局状态
@@ -322,6 +355,14 @@ def handle_custom_command(command: str) -> str:
 
     success, output = app_state.device_manager.run_adb_command(command, app_state.current_device)
     return f"{'✅' if success else '❌'} 执行结果:\n{output}"
+
+
+def handle_clear_cache() -> str:
+    """清理Gradio缓存"""
+    success = clear_gradio_cache()
+    if success:
+        return "✅ 缓存已清理"
+    return "❌ 清理缓存失败"
 
 
 def handle_install_apk(file) -> str:
@@ -743,6 +784,7 @@ def create_app() -> gr.Blocks:
                         # 系统工具
                         gr.Markdown("#### 系统工具")
                         open_settings_btn = gr.Button("⚙️ 打开系统设置")
+                        clear_cache_btn = gr.Button("🧹 清理缓存")
 
                         # APK安装
                         gr.Markdown("#### 安装APK")
@@ -877,6 +919,11 @@ def create_app() -> gr.Blocks:
                 open_settings_btn.click(
                     fn=handle_open_settings,
                     outputs=[tool_status, preview_image],
+                )
+
+                clear_cache_btn.click(
+                    fn=handle_clear_cache,
+                    outputs=[tool_status],
                 )
 
                 # APK安装
@@ -1176,6 +1223,12 @@ def create_app() -> gr.Blocks:
 
 def launch_app(share: bool = False, server_port: int = 7860):
     """启动应用"""
+    # 启动前清理缓存，避免磁盘空间不足
+    clear_gradio_cache()
+
+    # 确保缓存目录存在
+    os.makedirs(GRADIO_CACHE_DIR, exist_ok=True)
+
     app = create_app()
     # 启用队列以支持实时流式输出
     app.queue(max_size=20)
