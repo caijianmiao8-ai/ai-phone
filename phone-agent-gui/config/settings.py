@@ -35,7 +35,7 @@ class Settings:
     # 模型API配置
     api_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     api_key: str = ""
-    model_name: str = "autoglm-phone-9b"
+    model_name: str = "autoglm-phone"
     max_tokens: int = 3000
     temperature: float = 0.1
 
