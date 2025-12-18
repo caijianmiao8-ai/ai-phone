@@ -256,6 +256,7 @@ def run_task(task: str, use_knowledge: bool) -> Tuple[str, Optional[Image.Image]
         max_tokens=settings.max_tokens,
         temperature=settings.temperature,
         device_id=app_state.current_device,
+        device_type=settings.device_type,
         max_steps=settings.max_steps,
         language=settings.language,
         verbose=settings.verbose,
@@ -363,6 +364,7 @@ def test_api() -> str:
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
         model_name=settings.model_name,
+        device_type=settings.device_type,
     )
     success, message = agent.test_api_connection()
     return f"{'✅' if success else '❌'} {message}"
@@ -383,7 +385,6 @@ def create_app() -> gr.Blocks:
 
     with gr.Blocks(
         title="Phone Agent - AI手机助手",
-        theme=gr.themes.Soft(),
     ) as app:
         gr.Markdown(
             """
@@ -760,4 +761,5 @@ def launch_app(share: bool = False, server_port: int = 7860):
         share=share,
         server_port=server_port,
         show_error=True,
+        theme=gr.themes.Soft(),
     )
