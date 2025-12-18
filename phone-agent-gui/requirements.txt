@@ -1,0 +1,13 @@
+# Phone Agent GUI 依赖
+
+# UI框架
+gradio>=4.0.0
+
+# 图像处理
+Pillow>=10.0.0
+
+# AI模型API
+openai>=1.0.0
+
+# 打包工具 (开发时使用)
+pyinstaller>=6.0.0
