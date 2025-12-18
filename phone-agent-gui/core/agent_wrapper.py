@@ -68,7 +68,7 @@ class AgentWrapper:
         use_knowledge_base: bool = True,
     ):
         self.api_base_url = api_base_url
-        self.api_key = api_key
+        self.api_key = (api_key or "").strip()
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -160,9 +160,13 @@ class AgentWrapper:
         try:
             from openai import OpenAI
 
+            api_key = (self.api_key or "").strip()
+            if not api_key:
+                return False, "API Key 不能为空"
+
             client = OpenAI(
                 base_url=self.api_base_url,
-                api_key=self.api_key or "test-key",
+                api_key=api_key,
             )
 
             # 简单测试请求
