@@ -6,6 +6,9 @@ import gradio as gr
 import threading
 import time
 import io
+import os
+import shutil
+import tempfile
 from PIL import Image
 from typing import Optional, List, Tuple, Generator
 
@@ -14,6 +17,36 @@ from knowledge_base.manager import KnowledgeManager, KnowledgeItem
 from core.device_manager import DeviceManager, DeviceInfo
 from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper
+
+
+# 配置 Gradio 缓存目录
+GRADIO_CACHE_DIR = os.path.join(tempfile.gettempdir(), "phone_agent_gradio_cache")
+
+
+def clear_gradio_cache():
+    """清理 Gradio 缓存目录"""
+    try:
+        # 清理自定义缓存目录
+        if os.path.exists(GRADIO_CACHE_DIR):
+            shutil.rmtree(GRADIO_CACHE_DIR, ignore_errors=True)
+            os.makedirs(GRADIO_CACHE_DIR, exist_ok=True)
+
+        # 清理默认 Gradio 缓存
+        default_cache = os.path.join(tempfile.gettempdir(), "gradio")
+        if os.path.exists(default_cache):
+            # 只删除超过1小时的文件
+            now = time.time()
+            for root, dirs, files in os.walk(default_cache):
+                for f in files:
+                    filepath = os.path.join(root, f)
+                    try:
+                        if now - os.path.getmtime(filepath) > 3600:  # 1小时
+                            os.remove(filepath)
+                    except Exception:
+                        pass
+        return True
+    except Exception:
+        return False
 
 
 # 全局状态
@@ -112,6 +145,235 @@ def refresh_screenshot() -> Optional[Image.Image]:
         app_state.current_screenshot = data
         return Image.open(io.BytesIO(data))
     return None
+
+
+# ==================== 屏幕操作功能 ====================
+
+# 存储屏幕尺寸用于坐标转换
+_screen_size_cache = {}
+
+
+def _get_screen_size() -> Tuple[int, int]:
+    """获取当前设备屏幕尺寸"""
+    if not app_state.current_device:
+        return 1080, 1920
+    if app_state.current_device not in _screen_size_cache:
+        _screen_size_cache[app_state.current_device] = \
+            app_state.device_manager.get_screen_size(app_state.current_device)
+    return _screen_size_cache[app_state.current_device]
+
+
+def handle_screen_click(evt: gr.SelectData) -> Tuple[str, Optional[Image.Image]]:
+    """处理屏幕点击事件"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+
+    # 获取点击坐标（Gradio 返回的是图片上的坐标）
+    x, y = evt.index
+
+    # 获取实际屏幕尺寸进行坐标转换
+    screen_w, screen_h = _get_screen_size()
+
+    # 获取当前截图的实际显示尺寸
+    if app_state.current_screenshot:
+        img = Image.open(io.BytesIO(app_state.current_screenshot))
+        img_w, img_h = img.size
+        # 计算缩放比例
+        scale_x = screen_w / img_w
+        scale_y = screen_h / img_h
+        # 转换坐标
+        real_x = int(x * scale_x)
+        real_y = int(y * scale_y)
+    else:
+        real_x, real_y = x, y
+
+    # 执行点击
+    success, msg = app_state.device_manager.tap(real_x, real_y, app_state.current_device)
+
+    # 等待并刷新截图
+    time.sleep(0.5)
+    screenshot = refresh_screenshot()
+
+    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+
+
+def handle_swipe(direction: str) -> Tuple[str, Optional[Image.Image]]:
+    """处理滑动操作"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+
+    screen_w, screen_h = _get_screen_size()
+    cx, cy = screen_w // 2, screen_h // 2
+
+    # 根据方向计算滑动坐标
+    swipe_distance = min(screen_w, screen_h) // 3
+    coords = {
+        "up": (cx, cy + swipe_distance, cx, cy - swipe_distance),
+        "down": (cx, cy - swipe_distance, cx, cy + swipe_distance),
+        "left": (cx + swipe_distance, cy, cx - swipe_distance, cy),
+        "right": (cx - swipe_distance, cy, cx + swipe_distance, cy),
+    }
+
+    if direction not in coords:
+        return "无效的滑动方向", None
+
+    x1, y1, x2, y2 = coords[direction]
+    success, msg = app_state.device_manager.swipe(x1, y1, x2, y2, 300, app_state.current_device)
+
+    time.sleep(0.5)
+    screenshot = refresh_screenshot()
+    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+
+
+def handle_back() -> Tuple[str, Optional[Image.Image]]:
+    """返回键"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+    success, msg = app_state.device_manager.press_back(app_state.current_device)
+    time.sleep(0.3)
+    screenshot = refresh_screenshot()
+    return f"✅ 返回" if success else f"❌ {msg}", screenshot
+
+
+def handle_home() -> Tuple[str, Optional[Image.Image]]:
+    """主页键"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+    success, msg = app_state.device_manager.press_home(app_state.current_device)
+    time.sleep(0.3)
+    screenshot = refresh_screenshot()
+    return f"✅ 主页" if success else f"❌ {msg}", screenshot
+
+
+def handle_recent() -> Tuple[str, Optional[Image.Image]]:
+    """最近任务"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+    success, msg = app_state.device_manager.press_recent(app_state.current_device)
+    time.sleep(0.3)
+    screenshot = refresh_screenshot()
+    return f"✅ 最近任务" if success else f"❌ {msg}", screenshot
+
+
+def handle_input_text(text: str) -> Tuple[str, Optional[Image.Image]]:
+    """输入文本"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+    if not text:
+        return "请输入文本", None
+
+    success, msg = app_state.device_manager.input_text(text, app_state.current_device)
+    time.sleep(0.3)
+    screenshot = refresh_screenshot()
+    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+
+
+def handle_enter() -> Tuple[str, Optional[Image.Image]]:
+    """回车键"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+    success, msg = app_state.device_manager.press_enter(app_state.current_device)
+    time.sleep(0.3)
+    screenshot = refresh_screenshot()
+    return f"✅ 回车" if success else f"❌ {msg}", screenshot
+
+
+# ADB键盘下载地址
+ADB_KEYBOARD_URL = "https://github.com/nicksay/ADBKeyboard/releases/download/v1.0/ADBKeyboard.apk"
+
+
+def handle_install_adb_keyboard() -> str:
+    """安装ADB键盘"""
+    if not app_state.current_device:
+        return "请先选择设备"
+
+    # 先检查是否已安装
+    success, output = app_state.device_manager.run_shell_command(
+        "pm list packages com.android.adbkeyboard",
+        app_state.current_device
+    )
+    if success and "com.android.adbkeyboard" in output:
+        return "✅ ADB键盘已安装，无需重复安装"
+
+    return "⏳ 请手动下载 ADB Keyboard APK 并安装:\n" + ADB_KEYBOARD_URL
+
+
+def handle_enable_adb_keyboard() -> str:
+    """启用ADB键盘"""
+    if not app_state.current_device:
+        return "请先选择设备"
+
+    success, msg = app_state.device_manager.enable_adb_keyboard(app_state.current_device)
+    return f"✅ {msg}" if success else f"❌ {msg}"
+
+
+def handle_open_ime_settings() -> Tuple[str, Optional[Image.Image]]:
+    """打开输入法设置"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+
+    success, msg = app_state.device_manager.open_language_settings(app_state.current_device)
+    time.sleep(0.5)
+    screenshot = refresh_screenshot()
+    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+
+
+def handle_open_settings() -> Tuple[str, Optional[Image.Image]]:
+    """打开系统设置"""
+    if not app_state.current_device:
+        return "请先选择设备", None
+
+    success, msg = app_state.device_manager.open_settings(app_state.current_device)
+    time.sleep(0.5)
+    screenshot = refresh_screenshot()
+    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+
+
+def handle_list_ime() -> str:
+    """列出输入法"""
+    if not app_state.current_device:
+        return "请先选择设备"
+
+    success, output = app_state.device_manager.list_ime(app_state.current_device)
+    if success:
+        return f"已安装的输入法:\n{output}"
+    return f"❌ 获取失败: {output}"
+
+
+def handle_custom_command(command: str) -> str:
+    """执行自定义ADB命令"""
+    if not app_state.current_device:
+        return "请先选择设备"
+    if not command:
+        return "请输入命令"
+
+    # 安全检查：禁止危险命令
+    dangerous = ["rm -rf", "format", "factory", "wipe"]
+    for d in dangerous:
+        if d in command.lower():
+            return f"❌ 禁止执行危险命令: {d}"
+
+    success, output = app_state.device_manager.run_adb_command(command, app_state.current_device)
+    return f"{'✅' if success else '❌'} 执行结果:\n{output}"
+
+
+def handle_clear_cache() -> str:
+    """清理Gradio缓存"""
+    success = clear_gradio_cache()
+    if success:
+        return "✅ 缓存已清理"
+    return "❌ 清理缓存失败"
+
+
+def handle_install_apk(file) -> str:
+    """安装APK文件"""
+    if not app_state.current_device:
+        return "请先选择设备"
+    if file is None:
+        return "请选择APK文件"
+
+    success, msg = app_state.device_manager.install_apk(file.name, app_state.current_device)
+    return f"✅ {msg}" if success else f"❌ {msg}"
 
 
 # ==================== 知识库管理面板 ====================
@@ -433,7 +695,7 @@ def create_app() -> gr.Blocks:
                         scan_btn = gr.Button("🔍 扫描USB设备", variant="primary")
                         device_list = gr.Textbox(
                             label="设备列表",
-                            lines=6,
+                            lines=4,
                             interactive=False,
                         )
 
@@ -447,7 +709,7 @@ def create_app() -> gr.Blocks:
                         select_btn = gr.Button("选择此设备")
                         device_info = gr.Textbox(
                             label="设备信息",
-                            lines=5,
+                            lines=4,
                             interactive=False,
                         )
 
@@ -465,15 +727,89 @@ def create_app() -> gr.Blocks:
                         )
 
                     with gr.Column(scale=2):
-                        gr.Markdown("### 屏幕预览")
+                        gr.Markdown("### 屏幕操作 (点击屏幕可直接操作)")
                         preview_image = gr.Image(
-                            label="设备屏幕",
+                            label="点击图片操作设备",
                             type="pil",
-                            height=500,
+                            height=450,
+                            interactive=True,
                         )
-                        refresh_btn = gr.Button("🔄 刷新屏幕")
+                        operation_status = gr.Textbox(
+                            label="操作状态",
+                            interactive=False,
+                            lines=1,
+                        )
 
-                # 事件绑定
+                        # 导航按钮
+                        with gr.Row():
+                            refresh_btn = gr.Button("🔄 刷新", scale=1)
+                            back_btn = gr.Button("◀ 返回", scale=1)
+                            home_btn = gr.Button("🏠 主页", scale=1)
+                            recent_btn = gr.Button("📋 最近", scale=1)
+
+                        # 滑动按钮
+                        gr.Markdown("#### 滑动操作")
+                        with gr.Row():
+                            swipe_up_btn = gr.Button("⬆ 上滑")
+                            swipe_down_btn = gr.Button("⬇ 下滑")
+                            swipe_left_btn = gr.Button("⬅ 左滑")
+                            swipe_right_btn = gr.Button("➡ 右滑")
+
+                        # 文本输入
+                        gr.Markdown("#### 文本输入")
+                        with gr.Row():
+                            text_input = gr.Textbox(
+                                label="",
+                                placeholder="输入文本后点击发送",
+                                scale=3,
+                            )
+                            send_text_btn = gr.Button("📤 发送", scale=1)
+                            enter_btn = gr.Button("↵ 回车", scale=1)
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 快捷工具")
+
+                        # ADB键盘工具
+                        gr.Markdown("#### ADB键盘 (中文输入)")
+                        install_adb_kb_btn = gr.Button("📥 检查/安装 ADB键盘")
+                        enable_adb_kb_btn = gr.Button("✅ 启用 ADB键盘")
+                        open_ime_btn = gr.Button("⚙️ 打开输入法设置")
+                        list_ime_btn = gr.Button("📋 查看已安装输入法")
+                        tool_status = gr.Textbox(
+                            label="工具状态",
+                            interactive=False,
+                            lines=4,
+                        )
+
+                        # 系统工具
+                        gr.Markdown("#### 系统工具")
+                        open_settings_btn = gr.Button("⚙️ 打开系统设置")
+                        clear_cache_btn = gr.Button("🧹 清理缓存")
+
+                        # APK安装
+                        gr.Markdown("#### 安装APK")
+                        apk_file = gr.File(
+                            label="选择APK文件",
+                            file_types=[".apk"],
+                        )
+                        install_apk_btn = gr.Button("📦 安装APK")
+
+                        # 自定义命令
+                        gr.Markdown("#### 自定义ADB命令")
+                        custom_cmd = gr.Textbox(
+                            label="",
+                            placeholder="例如: shell dumpsys activity",
+                            lines=1,
+                        )
+                        run_cmd_btn = gr.Button("▶ 执行命令")
+                        cmd_output = gr.Textbox(
+                            label="命令输出",
+                            interactive=False,
+                            lines=5,
+                        )
+
+                # ========== 事件绑定 ==========
+                # 设备扫描和连接
                 scan_btn.click(
                     fn=scan_devices,
                     outputs=[device_list, device_dropdown],
@@ -499,9 +835,109 @@ def create_app() -> gr.Blocks:
                     outputs=[wifi_status],
                 )
 
+                # 屏幕操作
                 refresh_btn.click(
                     fn=refresh_screenshot,
                     outputs=[preview_image],
+                )
+
+                preview_image.select(
+                    fn=handle_screen_click,
+                    outputs=[operation_status, preview_image],
+                )
+
+                # 导航按钮
+                back_btn.click(
+                    fn=handle_back,
+                    outputs=[operation_status, preview_image],
+                )
+
+                home_btn.click(
+                    fn=handle_home,
+                    outputs=[operation_status, preview_image],
+                )
+
+                recent_btn.click(
+                    fn=handle_recent,
+                    outputs=[operation_status, preview_image],
+                )
+
+                # 滑动操作
+                swipe_up_btn.click(
+                    fn=lambda: handle_swipe("up"),
+                    outputs=[operation_status, preview_image],
+                )
+
+                swipe_down_btn.click(
+                    fn=lambda: handle_swipe("down"),
+                    outputs=[operation_status, preview_image],
+                )
+
+                swipe_left_btn.click(
+                    fn=lambda: handle_swipe("left"),
+                    outputs=[operation_status, preview_image],
+                )
+
+                swipe_right_btn.click(
+                    fn=lambda: handle_swipe("right"),
+                    outputs=[operation_status, preview_image],
+                )
+
+                # 文本输入
+                send_text_btn.click(
+                    fn=handle_input_text,
+                    inputs=[text_input],
+                    outputs=[operation_status, preview_image],
+                )
+
+                enter_btn.click(
+                    fn=handle_enter,
+                    outputs=[operation_status, preview_image],
+                )
+
+                # 快捷工具
+                install_adb_kb_btn.click(
+                    fn=handle_install_adb_keyboard,
+                    outputs=[tool_status],
+                )
+
+                enable_adb_kb_btn.click(
+                    fn=handle_enable_adb_keyboard,
+                    outputs=[tool_status],
+                )
+
+                open_ime_btn.click(
+                    fn=handle_open_ime_settings,
+                    outputs=[tool_status, preview_image],
+                )
+
+                list_ime_btn.click(
+                    fn=handle_list_ime,
+                    outputs=[tool_status],
+                )
+
+                open_settings_btn.click(
+                    fn=handle_open_settings,
+                    outputs=[tool_status, preview_image],
+                )
+
+                clear_cache_btn.click(
+                    fn=handle_clear_cache,
+                    outputs=[tool_status],
+                )
+
+                # APK安装
+                install_apk_btn.click(
+                    fn=handle_install_apk,
+                    inputs=[apk_file],
+                    outputs=[tool_status],
+                )
+
+                # 自定义命令
+                run_cmd_btn.click(
+                    fn=handle_custom_command,
+                    inputs=[custom_cmd],
+                    outputs=[cmd_output],
                 )
 
             # ============ 知识库管理 Tab ============
@@ -787,6 +1223,12 @@ def create_app() -> gr.Blocks:
 
 def launch_app(share: bool = False, server_port: int = 7860):
     """启动应用"""
+    # 启动前清理缓存，避免磁盘空间不足
+    clear_gradio_cache()
+
+    # 确保缓存目录存在
+    os.makedirs(GRADIO_CACHE_DIR, exist_ok=True)
+
     app = create_app()
     # 启用队列以支持实时流式输出
     app.queue(max_size=20)
