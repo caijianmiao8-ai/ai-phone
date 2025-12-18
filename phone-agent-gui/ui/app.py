@@ -256,6 +256,7 @@ def run_task(task: str, use_knowledge: bool) -> Tuple[str, Optional[Image.Image]
         max_tokens=settings.max_tokens,
         temperature=settings.temperature,
         device_id=app_state.current_device,
+        device_type=settings.device_type,
         max_steps=settings.max_steps,
         language=settings.language,
         verbose=settings.verbose,
@@ -363,6 +364,7 @@ def test_api() -> str:
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
         model_name=settings.model_name,
+        device_type=settings.device_type,
     )
     success, message = agent.test_api_connection()
     return f"{'✅' if success else '❌'} {message}"
