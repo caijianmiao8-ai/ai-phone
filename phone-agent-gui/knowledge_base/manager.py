@@ -4,10 +4,21 @@
 """
 import json
 import os
+import sys
 import re
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 from datetime import datetime
+
+
+def get_user_data_path() -> str:
+    """获取用户数据目录（用于存储配置、知识库等可写数据）"""
+    if getattr(sys, 'frozen', False):
+        # 打包后使用 exe 所在目录
+        return os.path.dirname(sys.executable)
+    else:
+        # 开发环境使用项目目录
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @dataclass
@@ -50,11 +61,8 @@ class KnowledgeManager:
 
     def __init__(self, storage_path: str = None):
         if storage_path is None:
-            # 默认存储在用户目录下
-            storage_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "data"
-            )
+            # 默认存储在用户数据目录下
+            storage_path = os.path.join(get_user_data_path(), "knowledge_base", "data")
         self.storage_path = storage_path
         self.data_file = os.path.join(storage_path, "knowledge_base.json")
         self._items: List[KnowledgeItem] = []

@@ -2,51 +2,39 @@
 """
 PyInstaller 打包配置文件
 用于将 Phone Agent GUI 打包成 Windows 可执行文件
-
-使用方法:
-1. 先运行 python build.py 准备依赖
-2. 或直接运行 pyinstaller PhoneAgent.spec
 """
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # 项目路径
 BASE_DIR = os.path.dirname(os.path.abspath(SPEC))
+HOOKS_DIR = os.path.join(BASE_DIR, 'hooks')
 
 block_cipher = None
 
 # 收集数据文件
-datas = [
-    # ADB工具
-    (os.path.join(BASE_DIR, 'adb'), 'adb'),
-    # 配置目录
-    (os.path.join(BASE_DIR, 'config'), 'config'),
-    # 知识库数据
-    (os.path.join(BASE_DIR, 'knowledge_base', 'data'), 'knowledge_base/data'),
-]
+datas = []
+
+# ADB工具
+adb_dir = os.path.join(BASE_DIR, 'adb')
+if os.path.exists(adb_dir):
+    datas.append((adb_dir, 'adb'))
+
+# 配置目录
+config_dir = os.path.join(BASE_DIR, 'config')
+if os.path.exists(config_dir):
+    datas.append((config_dir, 'config'))
+
+# 知识库数据
+kb_data_dir = os.path.join(BASE_DIR, 'knowledge_base', 'data')
+if os.path.exists(kb_data_dir):
+    datas.append((kb_data_dir, 'knowledge_base/data'))
 
 # 如果本地有 phone_agent 模块，打包进去
 phone_agent_path = os.path.join(BASE_DIR, 'phone_agent')
 if os.path.exists(phone_agent_path):
     datas.append((phone_agent_path, 'phone_agent'))
-
-# 收集 Gradio 及其依赖的数据文件
-try:
-    datas += collect_data_files('gradio')
-except Exception:
-    pass
-
-try:
-    datas += collect_data_files('gradio_client')
-except Exception:
-    pass
-
-try:
-    datas += collect_data_files('safehttpx')
-except Exception:
-    pass
 
 # 隐藏导入
 hiddenimports = [
@@ -71,24 +59,13 @@ hiddenimports = [
     'phone_agent.config',
 ]
 
-# 收集 Gradio 子模块
-try:
-    hiddenimports += collect_submodules('gradio')
-except Exception:
-    pass
-
-try:
-    hiddenimports += collect_submodules('gradio_client')
-except Exception:
-    pass
-
 a = Analysis(
     ['main.py'],
     pathex=[BASE_DIR],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[HOOKS_DIR],  # 使用自定义 hooks 目录
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -110,13 +87,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,  # 开启控制台以便查看日志，正式发布时改为 False
+    console=True,  # 开启控制台以便查看日志
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=os.path.join(BASE_DIR, 'resources', 'icon.ico') if os.path.exists(os.path.join(BASE_DIR, 'resources', 'icon.ico')) else None,
 )
 
 coll = COLLECT(

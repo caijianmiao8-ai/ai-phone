@@ -4,8 +4,29 @@
 """
 import json
 import os
+import sys
 from dataclasses import dataclass, asdict, field
 from typing import Optional
+
+
+def get_base_path() -> str:
+    """获取应用基础路径，兼容 PyInstaller 打包"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后的路径
+        return sys._MEIPASS
+    else:
+        # 开发环境路径
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_user_data_path() -> str:
+    """获取用户数据目录（用于存储配置、知识库等可写数据）"""
+    if getattr(sys, 'frozen', False):
+        # 打包后使用 exe 所在目录
+        return os.path.dirname(sys.executable)
+    else:
+        # 开发环境使用项目目录
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @dataclass
@@ -48,10 +69,7 @@ class Settings:
 
 def get_config_path() -> str:
     """获取配置文件路径"""
-    config_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "config"
-    )
+    config_dir = os.path.join(get_user_data_path(), "config")
     os.makedirs(config_dir, exist_ok=True)
     return os.path.join(config_dir, "settings.json")
 
