@@ -86,89 +86,91 @@ app_state = AppState()
 def scan_devices():
     """扫描设备并更新下拉框"""
     devices = app_state.device_manager.scan_devices()
-    app_state._cached_devices = devices  # 缓存设备列表
+    app_state._cached_devices = devices
 
     if not devices:
-        result_text = "未发现设备。请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
-        choices = []
-    else:
-        result_text = "发现以下设备:\n\n"
-        for d in devices:
-            # 状态图标
-            status_icon = "✅" if d.is_online else "⚫"
-            # 收藏图标
-            fav_icon = "⭐ " if d.is_favorite else ""
-            # 连接类型图标
-            conn_icon = "📶" if d.is_remote else "🔌"
-            # 显示名称
-            display = d.full_display_name
-            result_text += f"{status_icon} {fav_icon}{display} - {d.status_text} {conn_icon}\n"
+        result_text = "未发现设备\n请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
+        return result_text, gr.update(choices=[], value=None)
 
-        # 下拉框选项：使用 (display_name, device_id) 格式
-        choices = [(d.full_display_name, d.device_id) for d in devices if d.is_online]
-        # 如果没有在线设备，显示所有已保存设备
-        if not choices:
-            choices = [(d.full_display_name, d.device_id) for d in devices]
+    result_text = ""
+    choices = []
 
-    selected_value = app_state.current_device if app_state.current_device in [c[1] if isinstance(c, tuple) else c for c in choices] else None
-    return result_text, gr.update(choices=choices, value=selected_value)
+    for d in devices:
+        # 状态图标
+        status_icon = "🟢" if d.is_online else "⚫"
+        fav_icon = "⭐" if d.is_favorite else ""
+        conn_icon = "📶" if d.is_remote else "🔌"
+
+        result_text += f"{status_icon} {fav_icon}{d.display_name} ({d.device_id}) {conn_icon}\n"
+
+        # 只添加在线设备到下拉框
+        if d.is_online:
+            choices.append(d.device_id)
+
+    # 如果没有在线设备，显示所有已保存设备
+    if not choices:
+        choices = [d.device_id for d in devices]
+
+    selected = app_state.current_device if app_state.current_device in choices else None
+    return result_text.strip(), gr.update(choices=choices, value=selected)
 
 
-def select_device(device_id: str) -> Tuple[str, str, str, bool]:
-    """选择设备，返回 (设备信息, 自定义名称, 备注, 是否收藏)"""
+def select_device(device_id: str) -> Tuple[str, str, str, bool, Optional[Image.Image]]:
+    """选择设备，返回 (设备信息, 自定义名称, 备注, 是否收藏, 截图)"""
     if not device_id:
-        return "请先选择一个设备", "", "", False
+        return "请先选择一个设备", "", "", False, None
 
     app_state.current_device = device_id
     app_state.device_manager.set_current_device(device_id)
     app_state.settings.device_id = device_id
     save_settings(app_state.settings)
 
-    # 获取设备详细信息（合并在线和已保存信息）
+    # 获取设备详细信息
     info = app_state.device_manager.get_device_display_info(device_id)
 
-    status_icon = "✅" if info.get("is_online") else "⚫"
+    status_icon = "🟢" if info.get("is_online") else "⚫"
     conn_type = "WiFi" if info.get("device_type") == "wifi" else "USB"
 
-    info_text = f"""{status_icon} 设备ID: {device_id}
-状态: {info.get('status', '未知')} ({conn_type})
-品牌: {info.get('brand', '未知')}
-型号: {info.get('model', '未知')}
-Android版本: {info.get('android_version', '未知')}
-SDK版本: {info.get('sdk_version', '未知')}"""
+    info_text = f"""{status_icon} {info.get('status', '未知')} ({conn_type})
+设备: {device_id}
+品牌: {info.get('brand') or '未知'}
+型号: {info.get('model') or '未知'}
+Android: {info.get('android_version') or '未知'}"""
 
-    if info.get("last_connected"):
-        info_text += f"\n最后连接: {info.get('last_connected', '')[:19]}"
+    # 同时刷新截图
+    screenshot = None
+    if info.get("is_online"):
+        success, data = app_state.device_manager.take_screenshot(device_id)
+        if success and data:
+            app_state.current_screenshot = data
+            screenshot = Image.open(io.BytesIO(data))
 
     return (
         info_text,
         info.get("custom_name", ""),
         info.get("notes", ""),
-        info.get("is_favorite", False)
+        info.get("is_favorite", False),
+        screenshot
     )
 
 
 def connect_wifi(ip_address: str):
     """WiFi连接设备"""
     if not ip_address:
-        return "请输入IP地址", gr.update()
+        return "请输入IP地址"
 
-    # 清理IP地址
     ip_address = ip_address.strip()
     if ":" not in ip_address:
         ip_address = f"{ip_address}:5555"
 
     ip, port = ip_address.rsplit(":", 1)
     success, message = app_state.device_manager.connect_remote(ip, int(port))
+
     if success:
         app_state.settings.last_wifi_address = ip_address
         save_settings(app_state.settings)
-
-    # 更新设备列表
-    devices = app_state.device_manager.get_online_devices()
-    choices = [d.device_id for d in devices]
-
-    return message, gr.update(choices=choices, value=None)
+        return f"✅ {message}"
+    return f"❌ {message}"
 
 
 def disconnect_device() -> str:
@@ -990,17 +992,14 @@ def create_app() -> gr.Blocks:
                 device_dropdown.change(
                     fn=select_device,
                     inputs=[device_dropdown],
-                    outputs=[device_info, device_custom_name, device_notes, device_favorite],
-                ).then(
-                    fn=refresh_screenshot,
-                    outputs=[preview_image],
+                    outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
                 )
 
-                # WiFi连接 - 连接后自动扫描并刷新
+                # WiFi连接 - 连接后自动扫描
                 connect_btn.click(
                     fn=connect_wifi,
                     inputs=[wifi_ip],
-                    outputs=[wifi_status, device_dropdown],
+                    outputs=[wifi_status],
                 ).then(
                     fn=scan_devices,
                     outputs=[device_list, device_dropdown],
