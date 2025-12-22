@@ -7,22 +7,38 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from .adb_helper import ADBHelper
+from .device_registry import DeviceRegistry, SavedDevice
 
 
 @dataclass
 class DeviceInfo:
-    """设备信息"""
+    """设备信息（运行时状态）"""
     device_id: str
     status: str  # device, offline, unauthorized
     model: str = ""
     is_remote: bool = False
+    custom_name: str = ""      # 从注册表获取的自定义名称
+    is_favorite: bool = False  # 是否收藏
+    brand: str = ""            # 品牌
 
     @property
     def display_name(self) -> str:
-        """显示名称"""
+        """显示名称：优先使用自定义名称"""
+        if self.custom_name:
+            return self.custom_name
         if self.model:
-            return f"{self.model} ({self.device_id})"
+            if self.brand:
+                return f"{self.brand} {self.model}"
+            return self.model
         return self.device_id
+
+    @property
+    def full_display_name(self) -> str:
+        """完整显示名称：包含设备ID"""
+        name = self.display_name
+        if self.custom_name or self.model:
+            return f"{name} ({self.device_id})"
+        return name
 
     @property
     def is_online(self) -> bool:
@@ -41,17 +57,27 @@ class DeviceInfo:
 class DeviceManager:
     """设备管理器"""
 
-    def __init__(self, adb_helper: ADBHelper = None):
+    def __init__(self, adb_helper: ADBHelper = None, device_registry: DeviceRegistry = None):
         self.adb_helper = adb_helper or ADBHelper()
+        self.registry = device_registry or DeviceRegistry()
         self._current_device: Optional[str] = None
 
-    def scan_devices(self) -> List[DeviceInfo]:
-        """扫描所有已连接的设备"""
+    def scan_devices(self, include_saved_offline: bool = True) -> List[DeviceInfo]:
+        """
+        扫描所有已连接的设备，并合并已保存设备信息
+
+        Args:
+            include_saved_offline: 是否包含已保存但离线的设备
+        """
         success, output = self.adb_helper.run_command(["devices", "-l"])
         if not success:
+            # 如果扫描失败，返回已保存的设备（标记为离线）
+            if include_saved_offline:
+                return self._get_saved_devices_as_offline()
             return []
 
         devices = []
+        online_device_ids = set()
         lines = output.strip().split("\n")
 
         for line in lines[1:]:  # 跳过第一行 "List of devices attached"
@@ -62,6 +88,7 @@ class DeviceManager:
             if len(parts) >= 2:
                 device_id = parts[0]
                 status = parts[1]
+                online_device_ids.add(device_id)
 
                 # 提取设备型号
                 model = ""
@@ -71,14 +98,83 @@ class DeviceManager:
 
                 is_remote = ":" in device_id
 
+                # 从注册表获取已保存的信息
+                saved = self.registry.get(device_id)
+                custom_name = saved.custom_name if saved else ""
+                is_favorite = saved.is_favorite if saved else False
+                brand = saved.brand if saved else ""
+
+                # 如果是新设备或在线设备，更新注册表
+                if status == "device":
+                    self._update_registry_for_online_device(device_id, model, is_remote)
+
                 devices.append(DeviceInfo(
                     device_id=device_id,
                     status=status,
-                    model=model,
-                    is_remote=is_remote
+                    model=model or (saved.model if saved else ""),
+                    is_remote=is_remote,
+                    custom_name=custom_name,
+                    is_favorite=is_favorite,
+                    brand=brand
                 ))
 
+        # 添加已保存但当前离线的设备
+        if include_saved_offline:
+            for saved in self.registry.get_all():
+                if saved.device_id not in online_device_ids:
+                    devices.append(DeviceInfo(
+                        device_id=saved.device_id,
+                        status="offline",
+                        model=saved.model,
+                        is_remote=saved.device_type == "wifi",
+                        custom_name=saved.custom_name,
+                        is_favorite=saved.is_favorite,
+                        brand=saved.brand
+                    ))
+
+        # 按收藏状态和在线状态排序
+        devices.sort(key=lambda d: (not d.is_favorite, not d.is_online, d.display_name))
+
         return devices
+
+    def _get_saved_devices_as_offline(self) -> List[DeviceInfo]:
+        """将已保存的设备作为离线设备返回"""
+        devices = []
+        for saved in self.registry.get_all():
+            devices.append(DeviceInfo(
+                device_id=saved.device_id,
+                status="offline",
+                model=saved.model,
+                is_remote=saved.device_type == "wifi",
+                custom_name=saved.custom_name,
+                is_favorite=saved.is_favorite,
+                brand=saved.brand
+            ))
+        return devices
+
+    def _update_registry_for_online_device(self, device_id: str, model: str, is_remote: bool):
+        """更新在线设备的注册表信息"""
+        saved = self.registry.get(device_id)
+        if saved:
+            # 更新连接时间
+            saved.update_connection_time()
+            if model and not saved.model:
+                saved.model = model
+            self.registry.save()
+        else:
+            # 新设备，获取详细信息并保存
+            info = self.get_device_info_detail(device_id)
+            new_device = SavedDevice(
+                device_id=device_id,
+                device_type="wifi" if is_remote else "usb",
+                connection_address=device_id if is_remote else "",
+                brand=info.get("brand", ""),
+                model=info.get("model", "") or model,
+                android_version=info.get("android_version", ""),
+                sdk_version=info.get("sdk_version", ""),
+            )
+            new_device.update_connection_time()
+            self.registry.add_or_update(new_device)
 
     def get_online_devices(self) -> List[DeviceInfo]:
         """获取所有在线设备"""
@@ -398,3 +494,69 @@ class DeviceManager:
         args.extend(cmd_parts)
 
         return self.adb_helper.run_command(args, timeout=30)
+
+    # ==================== 设备注册表操作 ====================
+
+    def set_device_name(self, device_id: str, name: str) -> bool:
+        """设置设备自定义名称"""
+        return self.registry.set_custom_name(device_id, name)
+
+    def set_device_favorite(self, device_id: str, is_favorite: bool) -> bool:
+        """设置设备收藏状态"""
+        return self.registry.set_favorite(device_id, is_favorite)
+
+    def set_device_notes(self, device_id: str, notes: str) -> bool:
+        """设置设备备注"""
+        return self.registry.set_notes(device_id, notes)
+
+    def get_saved_device(self, device_id: str) -> Optional[SavedDevice]:
+        """获取已保存的设备信息"""
+        return self.registry.get(device_id)
+
+    def remove_saved_device(self, device_id: str) -> bool:
+        """删除已保存的设备"""
+        return self.registry.remove(device_id)
+
+    def get_device_display_info(self, device_id: str) -> dict:
+        """获取设备的显示信息（合并在线状态和保存信息）"""
+        saved = self.registry.get(device_id)
+        online_info = self.get_device_info_detail(device_id)
+
+        # 检查设备是否在线
+        devices = self.scan_devices(include_saved_offline=False)
+        is_online = any(d.device_id == device_id and d.is_online for d in devices)
+
+        result = {
+            "device_id": device_id,
+            "is_online": is_online,
+            "status": "已连接" if is_online else "离线",
+        }
+
+        if saved:
+            result.update({
+                "custom_name": saved.custom_name,
+                "display_name": saved.display_name,
+                "brand": saved.brand or online_info.get("brand", ""),
+                "model": saved.model or online_info.get("model", ""),
+                "android_version": saved.android_version or online_info.get("android_version", ""),
+                "sdk_version": saved.sdk_version or online_info.get("sdk_version", ""),
+                "device_type": saved.device_type,
+                "is_favorite": saved.is_favorite,
+                "notes": saved.notes,
+                "last_connected": saved.last_connected,
+            })
+        else:
+            result.update({
+                "custom_name": "",
+                "display_name": device_id,
+                "brand": online_info.get("brand", ""),
+                "model": online_info.get("model", ""),
+                "android_version": online_info.get("android_version", ""),
+                "sdk_version": online_info.get("sdk_version", ""),
+                "device_type": "wifi" if ":" in device_id else "usb",
+                "is_favorite": False,
+                "notes": "",
+                "last_connected": "",
+            })
+
+        return result
