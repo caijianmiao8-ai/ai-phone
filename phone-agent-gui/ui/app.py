@@ -9,8 +9,10 @@ import io
 import os
 import shutil
 import tempfile
+from collections import defaultdict
+from dataclasses import dataclass, field
 from PIL import Image
-from typing import Optional, List, Tuple, Generator
+from typing import Optional, List, Tuple, Generator, Dict
 
 from config.settings import Settings, get_settings, save_settings
 from knowledge_base.manager import KnowledgeManager, KnowledgeItem
@@ -18,7 +20,7 @@ from core.device_manager import DeviceManager, DeviceInfo
 from core.device_registry import DeviceRegistry
 from core.file_transfer import FileTransferManager, FileInfo, FileType
 from core.adb_helper import ADBHelper
-from core.agent_wrapper import AgentWrapper
+from core.agent_wrapper import AgentWrapper, TaskResult
 
 
 # 配置 Gradio 缓存目录
@@ -52,6 +54,14 @@ def clear_gradio_cache():
 
 
 # 全局状态
+@dataclass
+class DeviceTaskState:
+    logs: List[str] = field(default_factory=list)
+    status: str = "⏸️ 空闲"
+    screenshot: Optional[bytes] = None
+    agent: Optional[AgentWrapper] = None
+
+
 class AppState:
     def __init__(self):
         self.settings = get_settings()
@@ -61,14 +71,18 @@ class AppState:
         self.file_transfer = FileTransferManager(self.adb_helper)
         self.knowledge_manager = KnowledgeManager()
         self.agent: Optional[AgentWrapper] = None
+        self.current_screenshot: Optional[bytes] = None
         self.current_device: Optional[str] = self.settings.device_id
         if self.current_device:
             self.device_manager.set_current_device(self.current_device)
         self.is_task_running = False
         self.task_logs: List[str] = []
-        self.current_screenshot: Optional[bytes] = None
         # 缓存当前设备列表
         self._cached_devices: List[DeviceInfo] = []
+        # 多设备任务状态
+        self.device_states: Dict[str, DeviceTaskState] = defaultdict(DeviceTaskState)
+        self.state_lock = threading.Lock()
+        self.task_queue: List[dict] = []
 
     def add_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -76,6 +90,50 @@ class AppState:
         # 保留最近100条日志
         if len(self.task_logs) > 100:
             self.task_logs = self.task_logs[-100:]
+
+    def add_device_log(self, device_id: str, message: str):
+        timestamp = time.strftime("%H:%M:%S")
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.logs.append(f"[{timestamp}] {message}")
+            if len(state.logs) > 100:
+                state.logs = state.logs[-100:]
+
+    def reset_device_state(self, device_id: str):
+        with self.state_lock:
+            self.device_states[device_id] = DeviceTaskState()
+
+    def set_device_status(self, device_id: str, status: str):
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.status = status
+
+    def set_device_screenshot(self, device_id: str, data: Optional[bytes]):
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.screenshot = data
+
+    def set_device_agent(self, device_id: str, agent: Optional[AgentWrapper]):
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.agent = agent
+
+    def get_device_logs(self, device_id: str) -> str:
+        with self.state_lock:
+            logs = self.device_states[device_id].logs
+        return "\n".join(logs) if logs else "暂无日志"
+
+    def snapshot_states(self) -> Dict[str, DeviceTaskState]:
+        with self.state_lock:
+            return {
+                k: DeviceTaskState(
+                    logs=list(v.logs),
+                    status=v.status,
+                    screenshot=v.screenshot,
+                    agent=v.agent,
+                )
+                for k, v in self.device_states.items()
+            }
 
 
 app_state = AppState()
@@ -94,10 +152,12 @@ def scan_devices():
             result_text,
             gr.update(choices=[], value=None),
             gr.update(choices=[], value=[]),
+            gr.update(choices=[], value=[]),
         )
 
     result_text = ""
     choices = []
+    online_device_ids = []
 
     for d in devices:
         # 状态图标
@@ -110,6 +170,7 @@ def scan_devices():
         # 只添加在线设备到下拉框
         if d.is_online:
             choices.append(d.device_id)
+            online_device_ids.append(d.device_id)
 
     # 如果没有在线设备，显示所有已保存设备
     if not choices:
@@ -117,10 +178,12 @@ def scan_devices():
 
     multi_device_choices = [d.device_id for d in devices]
     selected = app_state.current_device if app_state.current_device in choices else None
+    multi_selected = [app_state.current_device] if app_state.current_device in online_device_ids else []
     return (
         result_text.strip(),
         gr.update(choices=choices, value=selected),
         gr.update(choices=multi_device_choices, value=[]),
+        gr.update(choices=multi_device_choices, value=multi_selected),
     )
 
 
@@ -711,44 +774,66 @@ def import_knowledge(file):
 
 # ==================== 任务执行面板 ====================
 
-def run_task(task: str, use_knowledge: bool) -> Generator[Tuple[str, Optional[Image.Image], str], None, None]:
-    """执行任务，实时返回状态/截图/日志"""
-    def make_logs_text() -> str:
-        return "\n".join(app_state.task_logs) if app_state.task_logs else "暂无日志"
+def _ensure_cached_devices() -> List[DeviceInfo]:
+    if not app_state._cached_devices:
+        app_state._cached_devices = app_state.device_manager.scan_devices()
+    return app_state._cached_devices
 
-    def bytes_to_image(data: Optional[bytes]) -> Optional[Image.Image]:
-        if not data:
-            return None
-        try:
-            return Image.open(io.BytesIO(data))
-        except Exception:
-            return None
 
+def _resolve_target_devices(target_device_ids: List[str]) -> Tuple[List[str], Optional[str]]:
+    devices = _ensure_cached_devices()
+    online_map = {d.device_id: d.is_online for d in devices}
+    default_targets = target_device_ids or ([] if not app_state.current_device else [app_state.current_device])
+
+    if not default_targets:
+        default_targets = [d.device_id for d in devices if d.is_online]
+
+    available_devices = [d for d in default_targets if online_map.get(d)]
+    offline_selected = [d for d in default_targets if d not in online_map or not online_map[d]]
+
+    if not available_devices:
+        return [], "请至少选择一个在线设备"
+
+    warning = None
+    if offline_selected:
+        warning = f"已忽略离线设备: {', '.join(offline_selected)}"
+
+    return available_devices, warning
+
+
+def prepare_task_queue(task: str, use_knowledge: bool, device_ids: List[str]) -> Tuple[bool, str, List[str]]:
+    """准备任务并放入队列"""
     if not task:
-        yield "请输入任务描述", None, make_logs_text()
-        return
+        return False, "请输入任务描述", []
 
-    if not app_state.current_device:
-        yield "请先选择一个设备", None, make_logs_text()
-        return
+    available_devices, warning = _resolve_target_devices(device_ids)
+    if not available_devices:
+        return False, "请至少选择一个在线设备", []
 
-    if app_state.is_task_running:
-        yield "已有任务在执行中", None, make_logs_text()
-        return
+    with app_state.state_lock:
+        app_state.task_queue = [{
+            "task": task,
+            "use_knowledge": use_knowledge,
+            "device_ids": available_devices,
+        }]
 
-    # 清空日志
-    app_state.task_logs = []
-    app_state.add_log(f"开始任务: {task}")
+    for device_id in available_devices:
+        app_state.reset_device_state(device_id)
+        app_state.set_device_status(device_id, "⏳ 排队中")
 
-    # 创建Agent
+    return True, warning or "任务已加入队列", available_devices
+
+
+def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> Optional[TaskResult]:
+    """在单个设备上执行任务"""
     settings = app_state.settings
-    app_state.agent = AgentWrapper(
+    agent = AgentWrapper(
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
         model_name=settings.model_name,
         max_tokens=settings.max_tokens,
         temperature=settings.temperature,
-        device_id=app_state.current_device,
+        device_id=device_id,
         device_type=settings.device_type,
         max_steps=settings.max_steps,
         language=settings.language,
@@ -756,64 +841,191 @@ def run_task(task: str, use_knowledge: bool) -> Generator[Tuple[str, Optional[Im
         knowledge_manager=app_state.knowledge_manager if use_knowledge else None,
         use_knowledge_base=use_knowledge,
     )
-    app_state.agent.on_log_callback = app_state.add_log
 
-    # 执行任务（同步生成器，逐步yield实时结果）
-    app_state.is_task_running = True
+    agent.on_log_callback = lambda msg, did=device_id: app_state.add_device_log(did, msg)
+    app_state.set_device_agent(device_id, agent)
+    app_state.set_device_status(device_id, "🚀 执行中")
 
-    def make_status(prefix: str) -> str:
-        return prefix
-
-    # 初始状态
-    yield make_status("🔄 任务执行中..."), bytes_to_image(app_state.current_screenshot), make_logs_text()
-
-    task_gen = app_state.agent.run_task(task)
-    task_result = None
+    task_gen = agent.run_task(task)
+    task_result: Optional[TaskResult] = None
 
     try:
         while True:
             step_result = next(task_gen)
             if step_result.screenshot:
-                app_state.current_screenshot = step_result.screenshot
-
-            status_text = "✅ 任务完成" if step_result.finished else "🔄 任务执行中..."
-            yield status_text, bytes_to_image(app_state.current_screenshot), make_logs_text()
+                app_state.set_device_screenshot(device_id, step_result.screenshot)
+            status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
+            app_state.set_device_status(device_id, status_text)
     except StopIteration as stop:
         task_result = stop.value
+        if task_result and not task_result.success:
+            app_state.set_device_status(device_id, f"❌ {task_result.message}")
+        else:
+            app_state.set_device_status(device_id, "✅ 任务完成")
     except Exception as e:
-        app_state.add_log(f"任务执行错误: {str(e)}")
-        yield "任务执行错误", bytes_to_image(app_state.current_screenshot), make_logs_text()
+        app_state.add_device_log(device_id, f"任务执行错误: {str(e)}")
+        app_state.set_device_status(device_id, f"❌ {e}")
     finally:
+        app_state.set_device_agent(device_id, None)
+
+    return task_result
+
+
+def start_task_execution(parallel: bool = True):
+    """启动队列中的任务"""
+    with app_state.state_lock:
+        if app_state.is_task_running:
+            return False, "已有任务在执行中", None
+        if not getattr(app_state, "task_queue", []):
+            return False, "任务队列为空", None
+        job = app_state.task_queue.pop(0)
+        app_state.is_task_running = True
+
+    results: Dict[str, Optional[TaskResult]] = {}
+    threads: List[threading.Thread] = []
+
+    def worker(device_id: str):
+        results[device_id] = execute_task_for_device(job["task"], job["use_knowledge"], device_id)
+
+    if parallel:
+        for device_id in job["device_ids"]:
+            t = threading.Thread(target=worker, args=(device_id,), daemon=True)
+            threads.append(t)
+            t.start()
+    else:
+        for device_id in job["device_ids"]:
+            worker(device_id)
+
+    if not threads:
         app_state.is_task_running = False
 
-    # 结束状态
-    final_status = "⏹️ 已停止" if app_state.agent and app_state.agent._should_stop else "✅ 任务完成"
-    if task_result and not task_result.success:
-        final_status = f"❌ {task_result.message}"
+    return True, "任务已启动", {"threads": threads, "results": results, "devices": job["device_ids"]}
 
-    yield final_status, bytes_to_image(app_state.current_screenshot), make_logs_text()
+
+def _render_device_status_board() -> str:
+    states = app_state.snapshot_states()
+    if not states:
+        return "暂无设备状态"
+
+    lines = []
+    for device_id, state in states.items():
+        if not state.logs and state.status == "⏸️ 空闲" and not state.screenshot:
+            continue
+        lines.append(f"- **{device_id}**: {state.status}")
+    if not lines:
+        return "暂无设备状态"
+    return "\n".join(lines)
+
+
+def _render_device_logs() -> str:
+    states = app_state.snapshot_states()
+    if not states:
+        return "暂无日志"
+
+    sections = []
+    for device_id, state in states.items():
+        if not state.logs:
+            continue
+        logs = state.logs[-20:] if state.logs else ["暂无日志"]
+        sections.append(f"#### {device_id}\n```\n" + "\n".join(logs) + "\n```")
+    if not sections:
+        return "暂无日志"
+    return "\n\n".join(sections)
+
+
+def _render_screenshot_gallery():
+    states = app_state.snapshot_states()
+    gallery_items = []
+    for device_id, state in states.items():
+        if state.screenshot:
+            try:
+                img = Image.open(io.BytesIO(state.screenshot))
+                gallery_items.append((img, f"{device_id}"))
+            except Exception:
+                continue
+    return gallery_items
+
+
+def query_task_status():
+    """查询当前任务状态"""
+    return _render_device_status_board(), _render_device_logs(), _render_screenshot_gallery()
+
+
+def run_task(task: str, use_knowledge: bool, device_ids: List[str]):
+    """执行任务，实时返回状态/截图/日志"""
+    if app_state.is_task_running:
+        yield "已有任务在执行中", _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
+        return
+
+    device_ids = device_ids or []
+    success, message, target_devices = prepare_task_queue(task, use_knowledge, device_ids)
+    if not success:
+        yield message, _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
+        return
+
+    start_ok, start_message, context = start_task_execution(parallel=True)
+    if not start_ok or context is None:
+        yield start_message, _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
+        return
+
+    status_hint = start_message if start_message else "🔄 任务执行中..."
+    if message and message != start_message:
+        status_hint = f"{status_hint} ({message})"
+
+    threads = context.get("threads", [])
+    results = context.get("results", {})
+    devices = context.get("devices", target_devices)
+
+    yield f"{status_hint} | 目标设备: {', '.join(devices)}", _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
+
+    while threads and any(t.is_alive() for t in threads):
+        time.sleep(0.5)
+        yield "🔄 任务执行中...", _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
+
+    if threads:
+        for t in threads:
+            t.join()
+
+    failures = []
+    for device_id, res in results.items():
+        if res is None or (res and not res.success):
+            failures.append(device_id)
+    for device_id, state in app_state.snapshot_states().items():
+        if state.status.startswith("❌") and device_id not in failures and device_id in results:
+            failures.append(device_id)
+    final_status = "✅ 所有设备完成" if not failures else f"❌ 部分设备失败: {', '.join(failures)}"
+    app_state.is_task_running = False
+
+    yield final_status, _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
 
 
 def stop_task() -> str:
     """停止任务"""
-    if app_state.agent and app_state.is_task_running:
+    stopped_devices = []
+    for device_id, state in app_state.snapshot_states().items():
+        if state.agent and state.agent.is_running():
+            state.agent.stop()
+            stopped_devices.append(device_id)
+    if app_state.agent and getattr(app_state.agent, "is_running", lambda: False)():
         app_state.agent.stop()
-        return "正在停止任务..."
+        stopped_devices.append("current")
+    if stopped_devices:
+        for device_id in stopped_devices:
+            if device_id != "current":
+                app_state.set_device_status(device_id, "⏹️ 手动停止")
+        app_state.is_task_running = False
+        return "正在停止所有任务..."
     return "没有正在执行的任务"
 
 
 def get_task_logs() -> str:
     """获取任务日志"""
-    if not app_state.task_logs:
-        return "暂无日志"
-    return "\n".join(app_state.task_logs)
+    return _render_device_logs()
 
 
-def get_task_screenshot() -> Optional[Image.Image]:
+def get_task_screenshot():
     """获取任务截图"""
-    if app_state.current_screenshot:
-        return Image.open(io.BytesIO(app_state.current_screenshot))
-    return None
+    return _render_screenshot_gallery()
 
 
 def get_task_status() -> str:
@@ -821,6 +1033,11 @@ def get_task_status() -> str:
     if app_state.is_task_running:
         return "🔄 任务执行中..."
     return "⏸️ 空闲"
+
+
+def refresh_task_panels():
+    """同时刷新日志和状态面板"""
+    return _render_device_logs(), _render_device_status_board()
 
 
 # ==================== 设置面板 ====================
@@ -1048,173 +1265,6 @@ def create_app() -> gr.Blocks:
                             tool_status = gr.Textbox(label="工具状态", interactive=False, lines=3)
                             cmd_output = gr.Textbox(label="命令输出", interactive=False, lines=3)
 
-                # ========== 事件绑定 ==========
-                # 设备扫描
-                scan_btn.click(
-                    fn=scan_devices,
-                    outputs=[device_list, device_dropdown, multi_device_selector],
-                )
-
-                # 选择设备时自动加载信息和刷新屏幕
-                device_dropdown.change(
-                    fn=select_device,
-                    inputs=[device_dropdown],
-                    outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
-                )
-
-                # WiFi连接 - 连接后自动扫描
-                connect_btn.click(
-                    fn=connect_wifi,
-                    inputs=[wifi_ip],
-                    outputs=[wifi_status],
-                ).then(
-                    fn=scan_devices,
-                    outputs=[device_list, device_dropdown, multi_device_selector],
-                )
-
-                disconnect_btn.click(
-                    fn=disconnect_device,
-                    outputs=[wifi_status],
-                ).then(
-                    fn=scan_devices,
-                    outputs=[device_list, device_dropdown, multi_device_selector],
-                )
-
-                # 设备设置保存和删除
-                save_device_btn.click(
-                    fn=save_device_settings,
-                    inputs=[device_custom_name, device_notes, device_favorite],
-                    outputs=[device_edit_status],
-                ).then(
-                    fn=scan_devices,
-                    outputs=[device_list, device_dropdown, multi_device_selector],
-                )
-
-                delete_device_btn.click(
-                    fn=delete_saved_device,
-                    outputs=[device_edit_status],
-                ).then(
-                    fn=scan_devices,
-                    outputs=[device_list, device_dropdown, multi_device_selector],
-                )
-
-                # 屏幕操作
-                refresh_btn.click(
-                    fn=refresh_screenshot,
-                    outputs=[preview_image],
-                )
-
-                preview_image.select(
-                    fn=handle_screen_click,
-                    outputs=[operation_status, preview_image],
-                )
-
-                # 导航按钮
-                back_btn.click(
-                    fn=handle_back,
-                    outputs=[operation_status, preview_image],
-                )
-
-                home_btn.click(
-                    fn=handle_home,
-                    outputs=[operation_status, preview_image],
-                )
-
-                recent_btn.click(
-                    fn=handle_recent,
-                    outputs=[operation_status, preview_image],
-                )
-
-                # 滑动操作
-                swipe_up_btn.click(
-                    fn=lambda: handle_swipe("up"),
-                    outputs=[operation_status, preview_image],
-                )
-
-                swipe_down_btn.click(
-                    fn=lambda: handle_swipe("down"),
-                    outputs=[operation_status, preview_image],
-                )
-
-                swipe_left_btn.click(
-                    fn=lambda: handle_swipe("left"),
-                    outputs=[operation_status, preview_image],
-                )
-
-                swipe_right_btn.click(
-                    fn=lambda: handle_swipe("right"),
-                    outputs=[operation_status, preview_image],
-                )
-
-                # 文本输入
-                send_text_btn.click(
-                    fn=handle_input_text,
-                    inputs=[text_input],
-                    outputs=[operation_status, preview_image],
-                )
-
-                enter_btn.click(
-                    fn=handle_enter,
-                    outputs=[operation_status, preview_image],
-                )
-
-                # 快捷工具
-                install_adb_kb_btn.click(
-                    fn=handle_install_adb_keyboard,
-                    outputs=[tool_status],
-                )
-
-                enable_adb_kb_btn.click(
-                    fn=handle_enable_adb_keyboard,
-                    outputs=[tool_status],
-                )
-
-                open_ime_btn.click(
-                    fn=handle_open_ime_settings,
-                    outputs=[tool_status, preview_image],
-                )
-
-                list_ime_btn.click(
-                    fn=handle_list_ime,
-                    outputs=[tool_status],
-                )
-
-                open_settings_btn.click(
-                    fn=handle_open_settings,
-                    outputs=[tool_status, preview_image],
-                )
-
-                clear_cache_btn.click(
-                    fn=handle_clear_cache,
-                    outputs=[tool_status],
-                )
-
-                # 多文件上传
-                upload_files.change(
-                    fn=analyze_upload_files,
-                    inputs=[upload_files],
-                    outputs=[upload_file_info],
-                )
-
-                upload_btn.click(
-                    fn=upload_files_to_devices,
-                    inputs=[upload_files, multi_device_selector],
-                    outputs=[upload_status, upload_result_table],
-                )
-
-                # 自定义命令
-                run_cmd_btn.click(
-                    fn=handle_custom_command,
-                    inputs=[custom_cmd],
-                    outputs=[cmd_output],
-                )
-
-                # 初始加载设备列表
-                app.load(
-                    fn=scan_devices,
-                    outputs=[device_list, device_dropdown, multi_device_selector],
-                )
-
             # ============ 知识库管理 Tab ============
             with gr.Tab("📚 知识库"):
                 with gr.Row():
@@ -1326,6 +1376,11 @@ def create_app() -> gr.Blocks:
                             label="启用知识库辅助",
                             value=True,
                         )
+                        task_device_selector = gr.CheckboxGroup(
+                            label="执行设备",
+                            choices=[],
+                            info="不选择时默认当前在线设备；仅会对在线设备执行任务",
+                        )
                         with gr.Row():
                             run_btn = gr.Button("▶️ 开始执行", variant="primary", scale=2)
                             stop_btn = gr.Button("⏹️ 停止", variant="stop", scale=1)
@@ -1336,44 +1391,214 @@ def create_app() -> gr.Blocks:
                             interactive=False,
                         )
 
-                        gr.Markdown("### 执行日志")
-                        log_area = gr.Textbox(
-                            label="",
-                            lines=15,
-                            interactive=False,
-                        )
-                        refresh_log_btn = gr.Button("🔄 刷新日志")
+                        with gr.Accordion("📟 设备状态", open=True):
+                            device_status_board = gr.Markdown("暂无设备状态")
+
+                        with gr.Accordion("📜 执行日志", open=True):
+                            log_area = gr.Markdown("暂无日志")
+                            refresh_log_btn = gr.Button("🔄 刷新日志")
 
                     with gr.Column(scale=1):
                         gr.Markdown("### 实时屏幕")
-                        task_screenshot = gr.Image(
+                        task_screenshot = gr.Gallery(
                             label="",
-                            type="pil",
+                            columns=2,
                             height=500,
+                            object_fit="contain",
                         )
                         refresh_task_screenshot_btn = gr.Button("🔄 刷新截图")
 
                 # 事件绑定
                 run_btn.click(
                     fn=run_task,
-                    inputs=[task_input, use_kb_checkbox],
-                    outputs=[task_status, task_screenshot, log_area],
+                    inputs=[task_input, use_kb_checkbox, task_device_selector],
+                    outputs=[task_status, task_screenshot, log_area, device_status_board],
                 )
 
                 stop_btn.click(
                     fn=stop_task,
                     outputs=[task_status],
+                ).then(
+                    fn=refresh_task_panels,
+                    outputs=[log_area, device_status_board],
                 )
 
                 refresh_log_btn.click(
-                    fn=get_task_logs,
-                    outputs=[log_area],
+                    fn=refresh_task_panels,
+                    outputs=[log_area, device_status_board],
                 )
 
                 refresh_task_screenshot_btn.click(
                     fn=get_task_screenshot,
                     outputs=[task_screenshot],
                 )
+
+            # ========== 设备管理事件绑定 ==========
+            # 设备扫描
+            scan_btn.click(
+                fn=scan_devices,
+                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+            )
+
+            # 选择设备时自动加载信息和刷新屏幕
+            device_dropdown.change(
+                fn=select_device,
+                inputs=[device_dropdown],
+                outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
+            )
+
+            # WiFi连接 - 连接后自动扫描
+            connect_btn.click(
+                fn=connect_wifi,
+                inputs=[wifi_ip],
+                outputs=[wifi_status],
+            ).then(
+                fn=scan_devices,
+                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+            )
+
+            disconnect_btn.click(
+                fn=disconnect_device,
+                outputs=[wifi_status],
+            ).then(
+                fn=scan_devices,
+                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+            )
+
+            # 设备设置保存和删除
+            save_device_btn.click(
+                fn=save_device_settings,
+                inputs=[device_custom_name, device_notes, device_favorite],
+                outputs=[device_edit_status],
+            ).then(
+                fn=scan_devices,
+                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+            )
+
+            delete_device_btn.click(
+                fn=delete_saved_device,
+                outputs=[device_edit_status],
+            ).then(
+                fn=scan_devices,
+                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+            )
+
+            # 屏幕操作
+            refresh_btn.click(
+                fn=refresh_screenshot,
+                outputs=[preview_image],
+            )
+
+            preview_image.select(
+                fn=handle_screen_click,
+                outputs=[operation_status, preview_image],
+            )
+
+            # 导航按钮
+            back_btn.click(
+                fn=handle_back,
+                outputs=[operation_status, preview_image],
+            )
+
+            home_btn.click(
+                fn=handle_home,
+                outputs=[operation_status, preview_image],
+            )
+
+            recent_btn.click(
+                fn=handle_recent,
+                outputs=[operation_status, preview_image],
+            )
+
+            # 滑动操作
+            swipe_up_btn.click(
+                fn=lambda: handle_swipe("up"),
+                outputs=[operation_status, preview_image],
+            )
+
+            swipe_down_btn.click(
+                fn=lambda: handle_swipe("down"),
+                outputs=[operation_status, preview_image],
+            )
+
+            swipe_left_btn.click(
+                fn=lambda: handle_swipe("left"),
+                outputs=[operation_status, preview_image],
+            )
+
+            swipe_right_btn.click(
+                fn=lambda: handle_swipe("right"),
+                outputs=[operation_status, preview_image],
+            )
+
+            # 文本输入
+            send_text_btn.click(
+                fn=handle_input_text,
+                inputs=[text_input],
+                outputs=[operation_status, preview_image],
+            )
+
+            enter_btn.click(
+                fn=handle_enter,
+                outputs=[operation_status, preview_image],
+            )
+
+            # 快捷工具
+            install_adb_kb_btn.click(
+                fn=handle_install_adb_keyboard,
+                outputs=[tool_status],
+            )
+
+            enable_adb_kb_btn.click(
+                fn=handle_enable_adb_keyboard,
+                outputs=[tool_status],
+            )
+
+            open_ime_btn.click(
+                fn=handle_open_ime_settings,
+                outputs=[tool_status, preview_image],
+            )
+
+            list_ime_btn.click(
+                fn=handle_list_ime,
+                outputs=[tool_status],
+            )
+
+            open_settings_btn.click(
+                fn=handle_open_settings,
+                outputs=[tool_status, preview_image],
+            )
+
+            clear_cache_btn.click(
+                fn=handle_clear_cache,
+                outputs=[tool_status],
+            )
+
+            # 多文件上传
+            upload_files.change(
+                fn=analyze_upload_files,
+                inputs=[upload_files],
+                outputs=[upload_file_info],
+            )
+
+            upload_btn.click(
+                fn=upload_files_to_devices,
+                inputs=[upload_files, multi_device_selector],
+                outputs=[upload_status, upload_result_table],
+            )
+
+            # 自定义命令
+            run_cmd_btn.click(
+                fn=handle_custom_command,
+                inputs=[custom_cmd],
+                outputs=[cmd_output],
+            )
+
+            # 初始加载设备列表
+            app.load(
+                fn=scan_devices,
+                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+            )
 
             # ============ 设置 Tab ============
             with gr.Tab("⚙️ 设置"):
