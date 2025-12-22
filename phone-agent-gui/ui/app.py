@@ -90,7 +90,11 @@ def scan_devices():
 
     if not devices:
         result_text = "未发现设备\n请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
-        return result_text, gr.update(choices=[], value=None)
+        return (
+            result_text,
+            gr.update(choices=[], value=None),
+            gr.update(choices=[], value=[]),
+        )
 
     result_text = ""
     choices = []
@@ -111,8 +115,13 @@ def scan_devices():
     if not choices:
         choices = [d.device_id for d in devices]
 
+    multi_device_choices = [d.device_id for d in devices]
     selected = app_state.current_device if app_state.current_device in choices else None
-    return result_text.strip(), gr.update(choices=choices, value=selected)
+    return (
+        result_text.strip(),
+        gr.update(choices=choices, value=selected),
+        gr.update(choices=multi_device_choices, value=[]),
+    )
 
 
 def select_device(device_id: str) -> Tuple[str, str, str, bool, Optional[Image.Image]]:
@@ -199,21 +208,19 @@ def save_device_settings(custom_name: str, notes: str, is_favorite: bool) -> str
     return f"✅ 设备设置已保存"
 
 
-def delete_saved_device() -> Tuple[str, str, str]:
+def delete_saved_device() -> str:
     """删除已保存的设备"""
     if not app_state.current_device:
-        return "请先选择设备", gr.update(), gr.update()
+        return "请先选择设备"
 
     device_id = app_state.current_device
     success = app_state.device_manager.remove_saved_device(device_id)
 
     if success:
         app_state.current_device = None
-        # 刷新设备列表
-        result_text, dropdown_update = scan_devices()
-        return f"✅ 已删除设备记录: {device_id}", result_text, dropdown_update
+        return f"✅ 已删除设备记录: {device_id}"
     else:
-        return "❌ 删除失败", gr.update(), gr.update()
+        return "❌ 删除失败"
 
 
 # ==================== 文件传输功能 ====================
@@ -262,40 +269,87 @@ def analyze_upload_files(files) -> str:
     return result
 
 
-def upload_files_to_device(files) -> str:
-    """上传文件到当前设备"""
-    if not app_state.current_device:
-        return "❌ 请先选择设备"
-
+def _prepare_file_infos(files):
+    """校验并解析上传文件"""
     if not files:
-        return "❌ 请先选择文件"
+        return None, "❌ 请先选择文件"
 
-    # 分析文件
-    file_infos = []
-    for f in files:
-        info = app_state.file_transfer.analyze_file(f.name)
-        if info:
-            file_infos.append(info)
-
+    file_infos = app_state.file_transfer.analyze_files([f.name for f in files])
     if not file_infos:
-        return "❌ 无法识别的文件"
+        return None, "❌ 无法识别的文件"
 
-    # 执行传输
-    results = []
-    success_count = 0
-    fail_count = 0
+    return file_infos, None
 
-    for info in file_infos:
-        result = app_state.file_transfer.transfer_file(info, app_state.current_device)
-        if result.success:
-            success_count += 1
-            results.append(f"✅ {info.name}: {result.message}")
-        else:
-            fail_count += 1
-            results.append(f"❌ {info.name}: {result.message}")
 
-    summary = f"\n传输完成: {success_count} 成功, {fail_count} 失败\n\n"
-    return summary + "\n".join(results)
+def _summarize_transfer_results(results, device_id: str):
+    """汇总单设备传输结果"""
+    success_count = sum(1 for r in results if r.success)
+    fail_count = len(results) - success_count
+
+    messages = []
+    rows = []
+    for res in results:
+        icon = "✅" if res.success else "❌"
+        messages.append(f"{icon} {res.file_info.name}: {res.message}")
+        rows.append([
+            device_id,
+            res.file_info.name,
+            f"{icon} {res.message}",
+        ])
+
+    summary = f"\n传输完成: {success_count} 成功, {fail_count} 失败\n\n" + "\n".join(messages)
+    return summary, rows
+
+
+def upload_files_to_devices(files, target_device_ids=None):
+    """上传文件到单个或多个设备"""
+    file_infos, error = _prepare_file_infos(files)
+    if error:
+        return error, []
+
+    selected_devices = target_device_ids or []
+
+    # 多设备传输
+    if selected_devices:
+        all_results = app_state.file_transfer.transfer_to_multiple_devices(
+            file_infos,
+            selected_devices,
+        )
+        summary_lines = []
+        table_rows = []
+
+        for device_id, results in all_results.items():
+            success_count = sum(1 for r in results if r.success)
+            fail_count = len(results) - success_count
+            summary_lines.append(f"{device_id}: {success_count} 成功, {fail_count} 失败")
+
+            for res in results:
+                icon = "✅" if res.success else "❌"
+                table_rows.append([
+                    device_id,
+                    res.file_info.name,
+                    f"{icon} {res.message}",
+                ])
+
+        summary_text = "多设备传输完成:\n" + "\n".join(summary_lines)
+        return summary_text, table_rows
+
+    # 单设备回退
+    if not app_state.current_device:
+        return "❌ 请先选择设备", []
+
+    single_results = app_state.file_transfer.transfer_files(
+        file_infos,
+        app_state.current_device,
+    )
+    summary, rows = _summarize_transfer_results(single_results, app_state.current_device)
+    return summary, rows
+
+
+def upload_files_to_device(files) -> str:
+    """兼容旧逻辑的单设备上传"""
+    summary, _ = upload_files_to_devices(files, None)
+    return summary
 
 
 def refresh_screenshot() -> Optional[Image.Image]:
@@ -927,9 +981,22 @@ def create_app() -> gr.Blocks:
                                     ".zip", ".rar", ".7z"
                                 ],
                             )
+                            multi_device_selector = gr.CheckboxGroup(
+                                label="选择多个设备",
+                                choices=[],
+                                interactive=True,
+                                info="勾选后同时推送到所选设备；留空则使用当前设备",
+                            )
                             upload_file_info = gr.Textbox(label="文件信息", interactive=False, lines=3)
                             upload_btn = gr.Button("📤 上传到设备", variant="primary")
                             upload_status = gr.Textbox(label="传输结果", interactive=False, lines=3)
+                            upload_result_table = gr.Dataframe(
+                                headers=["设备ID", "文件名", "结果"],
+                                label="详细结果",
+                                interactive=False,
+                                row_count=(0, "dynamic"),
+                                col_count=(3, "fixed"),
+                            )
 
                     # ===== 右侧：屏幕操作 =====
                     with gr.Column(scale=2):
@@ -985,7 +1052,7 @@ def create_app() -> gr.Blocks:
                 # 设备扫描
                 scan_btn.click(
                     fn=scan_devices,
-                    outputs=[device_list, device_dropdown],
+                    outputs=[device_list, device_dropdown, multi_device_selector],
                 )
 
                 # 选择设备时自动加载信息和刷新屏幕
@@ -1002,7 +1069,7 @@ def create_app() -> gr.Blocks:
                     outputs=[wifi_status],
                 ).then(
                     fn=scan_devices,
-                    outputs=[device_list, device_dropdown],
+                    outputs=[device_list, device_dropdown, multi_device_selector],
                 )
 
                 disconnect_btn.click(
@@ -1010,7 +1077,7 @@ def create_app() -> gr.Blocks:
                     outputs=[wifi_status],
                 ).then(
                     fn=scan_devices,
-                    outputs=[device_list, device_dropdown],
+                    outputs=[device_list, device_dropdown, multi_device_selector],
                 )
 
                 # 设备设置保存和删除
@@ -1020,12 +1087,15 @@ def create_app() -> gr.Blocks:
                     outputs=[device_edit_status],
                 ).then(
                     fn=scan_devices,
-                    outputs=[device_list, device_dropdown],
+                    outputs=[device_list, device_dropdown, multi_device_selector],
                 )
 
                 delete_device_btn.click(
                     fn=delete_saved_device,
-                    outputs=[device_edit_status, device_list, device_dropdown],
+                    outputs=[device_edit_status],
+                ).then(
+                    fn=scan_devices,
+                    outputs=[device_list, device_dropdown, multi_device_selector],
                 )
 
                 # 屏幕操作
@@ -1127,9 +1197,9 @@ def create_app() -> gr.Blocks:
                 )
 
                 upload_btn.click(
-                    fn=upload_files_to_device,
-                    inputs=[upload_files],
-                    outputs=[upload_status],
+                    fn=upload_files_to_devices,
+                    inputs=[upload_files, multi_device_selector],
+                    outputs=[upload_status, upload_result_table],
                 )
 
                 # 自定义命令
@@ -1142,7 +1212,7 @@ def create_app() -> gr.Blocks:
                 # 初始加载设备列表
                 app.load(
                     fn=scan_devices,
-                    outputs=[device_list, device_dropdown],
+                    outputs=[device_list, device_dropdown, multi_device_selector],
                 )
 
             # ============ 知识库管理 Tab ============
