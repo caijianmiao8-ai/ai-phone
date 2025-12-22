@@ -1660,6 +1660,7 @@ def create_app() -> gr.Blocks:
                 with gr.Row():
                     with gr.Column(scale=2):
                         gr.Markdown("### 对话助手")
+                        gr.Markdown("支持任意语言，助手会使用你输入的语言进行回复。")
                         assistant_chatbot = gr.Chatbot(height=420, label="对话记录")
                         assistant_input = gr.Textbox(
                             label="输入需求",

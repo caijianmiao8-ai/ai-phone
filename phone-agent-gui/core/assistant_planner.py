@@ -39,7 +39,8 @@ class AssistantPlanner:
         self.history: List[Dict[str, str]] = []
         self.system_prompt = (
             "你是设备任务规划助手，负责将用户需求拆解为可执行任务，"
-            "并标注目标设备、时间窗口和执行频率。保持回答简洁，必要时使用列表或表格。"
+            "并标注目标设备、时间窗口和执行频率。保持回答简洁，必要时使用列表或表格，"
+            "并尽量使用用户使用的语言进行回复，不要强制用户遵循特定语言或格式（除非返回结构化数据所需）。"
         )
 
     def update_config(self, api_base: str, api_key: str, model: str):
@@ -58,14 +59,33 @@ class AssistantPlanner:
         """清空会话历史，开始新会话"""
         self.history = []
 
+    def _get_language_hint(self, latest_user_msg: Optional[str]) -> str:
+        """根据最近的用户消息提示模型使用相同语言"""
+        if latest_user_msg:
+            snippet = latest_user_msg.strip()
+        else:
+            snippet = ""
+            for msg in reversed(self.history):
+                if msg.get("role") == "user":
+                    snippet = msg.get("content", "").strip()
+                    break
+        if snippet:
+            sample = snippet[:120]
+            return (
+                "请使用与用户最近消息相同的语言回复，保持自然表达。"
+                f"最近的用户内容示例: {sample}"
+            )
+        return "如果无法判断语言，请使用简洁的双语（中文/English）回应用户。"
+
     def chat(self, user_msg: str) -> str:
         """对话模式，返回助手回复"""
         if not user_msg:
             return "请先输入问题或需求。"
 
-        messages = [{"role": "system", "content": self.system_prompt}] + self.history + [
-            {"role": "user", "content": user_msg}
-        ]
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self._get_language_hint(user_msg)},
+        ] + self.history + [{"role": "user", "content": user_msg}]
 
         try:
             client = self._get_client()
@@ -89,14 +109,17 @@ class AssistantPlanner:
         """
         prompt = (
             "请基于当前对话生成一份结构化执行计划，返回 JSON，字段包括：\n"
-            "task_description: 任务概要（中文），\n"
+            "task_description: 任务概要（使用用户语言），\n"
             "target_devices: 需执行的设备ID列表（可为空数组），\n"
             "time_requirement: 时间要求/时间窗口（字符串，可为空），\n"
             "frequency: 执行频率描述（如一次性/每2小时/每天9:00，字符串）。\n"
-            "请只返回 JSON，不要添加额外说明。"
+            "请只返回 JSON，不要添加额外说明，字段内容沿用用户的语言。"
         )
 
-        messages = [{"role": "system", "content": prompt}] + self.history
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "system", "content": self._get_language_hint(None)},
+        ] + self.history
         if devices:
             messages.append(
                 {"role": "user", "content": f"当前用户选择的设备: {', '.join(devices)}"}
