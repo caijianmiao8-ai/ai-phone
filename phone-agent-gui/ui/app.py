@@ -15,6 +15,8 @@ from typing import Optional, List, Tuple, Generator
 from config.settings import Settings, get_settings, save_settings
 from knowledge_base.manager import KnowledgeManager, KnowledgeItem
 from core.device_manager import DeviceManager, DeviceInfo
+from core.device_registry import DeviceRegistry
+from core.file_transfer import FileTransferManager, FileInfo, FileType
 from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper
 
@@ -54,7 +56,9 @@ class AppState:
     def __init__(self):
         self.settings = get_settings()
         self.adb_helper = ADBHelper(self.settings.adb_path or None)
-        self.device_manager = DeviceManager(self.adb_helper)
+        self.device_registry = DeviceRegistry()
+        self.device_manager = DeviceManager(self.adb_helper, self.device_registry)
+        self.file_transfer = FileTransferManager(self.adb_helper)
         self.knowledge_manager = KnowledgeManager()
         self.agent: Optional[AgentWrapper] = None
         self.current_device: Optional[str] = self.settings.device_id
@@ -63,6 +67,8 @@ class AppState:
         self.is_task_running = False
         self.task_logs: List[str] = []
         self.current_screenshot: Optional[bytes] = None
+        # 缓存当前设备列表
+        self._cached_devices: List[DeviceInfo] = []
 
     def add_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -80,37 +86,66 @@ app_state = AppState()
 def scan_devices():
     """扫描设备并更新下拉框"""
     devices = app_state.device_manager.scan_devices()
+    app_state._cached_devices = devices  # 缓存设备列表
+
     if not devices:
         result_text = "未发现设备。请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
         choices = []
     else:
         result_text = "发现以下设备:\n\n"
         for d in devices:
-            status_icon = "✅" if d.is_online else "❌"
-            result_text += f"{status_icon} {d.display_name} - {d.status_text}\n"
-        choices = [d.device_id for d in app_state.device_manager.get_online_devices()]
+            # 状态图标
+            status_icon = "✅" if d.is_online else "⚫"
+            # 收藏图标
+            fav_icon = "⭐ " if d.is_favorite else ""
+            # 连接类型图标
+            conn_icon = "📶" if d.is_remote else "🔌"
+            # 显示名称
+            display = d.full_display_name
+            result_text += f"{status_icon} {fav_icon}{display} - {d.status_text} {conn_icon}\n"
 
-    selected_value = app_state.current_device if app_state.current_device in choices else None
+        # 下拉框选项：使用 (display_name, device_id) 格式
+        choices = [(d.full_display_name, d.device_id) for d in devices if d.is_online]
+        # 如果没有在线设备，显示所有已保存设备
+        if not choices:
+            choices = [(d.full_display_name, d.device_id) for d in devices]
+
+    selected_value = app_state.current_device if app_state.current_device in [c[1] if isinstance(c, tuple) else c for c in choices] else None
     return result_text, gr.update(choices=choices, value=selected_value)
 
 
-def select_device(device_id: str) -> str:
-    """选择设备"""
+def select_device(device_id: str) -> Tuple[str, str, str, bool]:
+    """选择设备，返回 (设备信息, 自定义名称, 备注, 是否收藏)"""
     if not device_id:
-        return "请先选择一个设备"
+        return "请先选择一个设备", "", "", False
 
     app_state.current_device = device_id
     app_state.device_manager.set_current_device(device_id)
     app_state.settings.device_id = device_id
     save_settings(app_state.settings)
 
-    # 获取设备详细信息
-    info = app_state.device_manager.get_device_info_detail(device_id)
-    return f"""已选择设备: {device_id}
+    # 获取设备详细信息（合并在线和已保存信息）
+    info = app_state.device_manager.get_device_display_info(device_id)
+
+    status_icon = "✅" if info.get("is_online") else "⚫"
+    conn_type = "WiFi" if info.get("device_type") == "wifi" else "USB"
+
+    info_text = f"""{status_icon} 设备ID: {device_id}
+状态: {info.get('status', '未知')} ({conn_type})
 品牌: {info.get('brand', '未知')}
 型号: {info.get('model', '未知')}
 Android版本: {info.get('android_version', '未知')}
 SDK版本: {info.get('sdk_version', '未知')}"""
+
+    if info.get("last_connected"):
+        info_text += f"\n最后连接: {info.get('last_connected', '')[:19]}"
+
+    return (
+        info_text,
+        info.get("custom_name", ""),
+        info.get("notes", ""),
+        info.get("is_favorite", False)
+    )
 
 
 def connect_wifi(ip_address: str):
@@ -141,6 +176,124 @@ def disconnect_device() -> str:
     success, message = app_state.device_manager.disconnect_all()
     app_state.current_device = None
     return "已断开所有远程连接"
+
+
+# ==================== 设备编辑功能 ====================
+
+def save_device_settings(custom_name: str, notes: str, is_favorite: bool) -> str:
+    """保存设备自定义设置"""
+    if not app_state.current_device:
+        return "请先选择设备"
+
+    device_id = app_state.current_device
+
+    # 保存自定义名称
+    app_state.device_manager.set_device_name(device_id, custom_name.strip())
+    # 保存备注
+    app_state.device_manager.set_device_notes(device_id, notes.strip())
+    # 保存收藏状态
+    app_state.device_manager.set_device_favorite(device_id, is_favorite)
+
+    return f"✅ 设备设置已保存"
+
+
+def delete_saved_device() -> Tuple[str, str, str]:
+    """删除已保存的设备"""
+    if not app_state.current_device:
+        return "请先选择设备", gr.update(), gr.update()
+
+    device_id = app_state.current_device
+    success = app_state.device_manager.remove_saved_device(device_id)
+
+    if success:
+        app_state.current_device = None
+        # 刷新设备列表
+        result_text, dropdown_update = scan_devices()
+        return f"✅ 已删除设备记录: {device_id}", result_text, dropdown_update
+    else:
+        return "❌ 删除失败", gr.update(), gr.update()
+
+
+# ==================== 文件传输功能 ====================
+
+def analyze_upload_files(files) -> str:
+    """分析上传的文件"""
+    if not files:
+        return "请选择要上传的文件"
+
+    file_infos = []
+    for f in files:
+        info = app_state.file_transfer.analyze_file(f.name)
+        if info:
+            file_infos.append(info)
+
+    if not file_infos:
+        return "无法识别的文件"
+
+    result = f"已选择 {len(file_infos)} 个文件:\n\n"
+    total_size = 0
+
+    for info in file_infos:
+        total_size += info.size
+        type_icon = {
+            FileType.APK: "📦",
+            FileType.VIDEO: "🎬",
+            FileType.AUDIO: "🎵",
+            FileType.IMAGE: "🖼️",
+            FileType.DOCUMENT: "📄",
+            FileType.OTHER: "📁",
+        }.get(info.file_type, "📁")
+
+        result += f"{type_icon} {info.name} ({info.size_display})\n"
+        result += f"   → {info.action_display}\n"
+
+    # 总大小
+    if total_size < 1024 * 1024:
+        total_display = f"{total_size / 1024:.1f} KB"
+    elif total_size < 1024 * 1024 * 1024:
+        total_display = f"{total_size / (1024 * 1024):.1f} MB"
+    else:
+        total_display = f"{total_size / (1024 * 1024 * 1024):.2f} GB"
+
+    result += f"\n总大小: {total_display}"
+
+    return result
+
+
+def upload_files_to_device(files) -> str:
+    """上传文件到当前设备"""
+    if not app_state.current_device:
+        return "❌ 请先选择设备"
+
+    if not files:
+        return "❌ 请先选择文件"
+
+    # 分析文件
+    file_infos = []
+    for f in files:
+        info = app_state.file_transfer.analyze_file(f.name)
+        if info:
+            file_infos.append(info)
+
+    if not file_infos:
+        return "❌ 无法识别的文件"
+
+    # 执行传输
+    results = []
+    success_count = 0
+    fail_count = 0
+
+    for info in file_infos:
+        result = app_state.file_transfer.transfer_file(info, app_state.current_device)
+        if result.success:
+            success_count += 1
+            results.append(f"✅ {info.name}: {result.message}")
+        else:
+            fail_count += 1
+            results.append(f"❌ {info.name}: {result.message}")
+
+    summary = f"\n传输完成: {success_count} 成功, {fail_count} 失败\n\n"
+    return summary + "\n".join(results)
 
 
 def refresh_screenshot() -> Optional[Image.Image]:
@@ -718,8 +871,32 @@ def create_app() -> gr.Blocks:
                         select_btn = gr.Button("选择此设备")
                         device_info = gr.Textbox(
                             label="设备信息",
-                            lines=4,
+                            lines=6,
                             interactive=False,
+                        )
+
+                        # 设备编辑区域
+                        gr.Markdown("### 设备设置")
+                        device_custom_name = gr.Textbox(
+                            label="自定义名称",
+                            placeholder="例如: 测试机A",
+                        )
+                        device_notes = gr.Textbox(
+                            label="备注",
+                            placeholder="设备用途说明...",
+                            lines=2,
+                        )
+                        device_favorite = gr.Checkbox(
+                            label="⭐ 收藏此设备",
+                            value=False,
+                        )
+                        with gr.Row():
+                            save_device_btn = gr.Button("💾 保存设置", variant="primary")
+                            delete_device_btn = gr.Button("🗑️ 删除记录", variant="stop")
+                        device_edit_status = gr.Textbox(
+                            label="",
+                            interactive=False,
+                            lines=1,
                         )
 
                         gr.Markdown("### WiFi连接")
@@ -796,13 +973,35 @@ def create_app() -> gr.Blocks:
                         open_settings_btn = gr.Button("⚙️ 打开系统设置")
                         clear_cache_btn = gr.Button("🧹 清理缓存")
 
-                        # APK安装
-                        gr.Markdown("#### 安装APK")
-                        apk_file = gr.File(
-                            label="选择APK文件",
-                            file_types=[".apk"],
+                        # 多文件上传
+                        gr.Markdown("#### 文件传输")
+                        gr.Markdown(
+                            "支持 APK、视频、音频、图片、文档等",
+                            elem_classes=["text-sm", "text-gray-500"]
                         )
-                        install_apk_btn = gr.Button("📦 安装APK")
+                        upload_files = gr.File(
+                            label="选择文件 (可多选)",
+                            file_count="multiple",
+                            file_types=[
+                                ".apk", ".xapk",
+                                ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".3gp",
+                                ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
+                                ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+                                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt",
+                                ".zip", ".rar", ".7z"
+                            ],
+                        )
+                        upload_file_info = gr.Textbox(
+                            label="文件信息",
+                            interactive=False,
+                            lines=5,
+                        )
+                        upload_btn = gr.Button("📤 上传到设备", variant="primary")
+                        upload_status = gr.Textbox(
+                            label="传输状态",
+                            interactive=False,
+                            lines=4,
+                        )
 
                         # 自定义命令
                         gr.Markdown("#### 自定义ADB命令")
@@ -828,10 +1027,25 @@ def create_app() -> gr.Blocks:
                 select_btn.click(
                     fn=select_device,
                     inputs=[device_dropdown],
-                    outputs=[device_info],
+                    outputs=[device_info, device_custom_name, device_notes, device_favorite],
                 ).then(
                     fn=refresh_screenshot,
                     outputs=[preview_image],
+                )
+
+                # 设备设置保存和删除
+                save_device_btn.click(
+                    fn=save_device_settings,
+                    inputs=[device_custom_name, device_notes, device_favorite],
+                    outputs=[device_edit_status],
+                ).then(
+                    fn=scan_devices,
+                    outputs=[device_list, device_dropdown],
+                )
+
+                delete_device_btn.click(
+                    fn=delete_saved_device,
+                    outputs=[device_edit_status, device_list, device_dropdown],
                 )
 
                 connect_btn.click(
@@ -936,11 +1150,17 @@ def create_app() -> gr.Blocks:
                     outputs=[tool_status],
                 )
 
-                # APK安装
-                install_apk_btn.click(
-                    fn=handle_install_apk,
-                    inputs=[apk_file],
-                    outputs=[tool_status],
+                # 多文件上传
+                upload_files.change(
+                    fn=analyze_upload_files,
+                    inputs=[upload_files],
+                    outputs=[upload_file_info],
+                )
+
+                upload_btn.click(
+                    fn=upload_files_to_device,
+                    inputs=[upload_files],
+                    outputs=[upload_status],
                 )
 
                 # 自定义命令
