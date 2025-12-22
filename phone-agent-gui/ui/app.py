@@ -86,89 +86,91 @@ app_state = AppState()
 def scan_devices():
     """扫描设备并更新下拉框"""
     devices = app_state.device_manager.scan_devices()
-    app_state._cached_devices = devices  # 缓存设备列表
+    app_state._cached_devices = devices
 
     if not devices:
-        result_text = "未发现设备。请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
-        choices = []
-    else:
-        result_text = "发现以下设备:\n\n"
-        for d in devices:
-            # 状态图标
-            status_icon = "✅" if d.is_online else "⚫"
-            # 收藏图标
-            fav_icon = "⭐ " if d.is_favorite else ""
-            # 连接类型图标
-            conn_icon = "📶" if d.is_remote else "🔌"
-            # 显示名称
-            display = d.full_display_name
-            result_text += f"{status_icon} {fav_icon}{display} - {d.status_text} {conn_icon}\n"
+        result_text = "未发现设备\n请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
+        return result_text, gr.update(choices=[], value=None)
 
-        # 下拉框选项：使用 (display_name, device_id) 格式
-        choices = [(d.full_display_name, d.device_id) for d in devices if d.is_online]
-        # 如果没有在线设备，显示所有已保存设备
-        if not choices:
-            choices = [(d.full_display_name, d.device_id) for d in devices]
+    result_text = ""
+    choices = []
 
-    selected_value = app_state.current_device if app_state.current_device in [c[1] if isinstance(c, tuple) else c for c in choices] else None
-    return result_text, gr.update(choices=choices, value=selected_value)
+    for d in devices:
+        # 状态图标
+        status_icon = "🟢" if d.is_online else "⚫"
+        fav_icon = "⭐" if d.is_favorite else ""
+        conn_icon = "📶" if d.is_remote else "🔌"
+
+        result_text += f"{status_icon} {fav_icon}{d.display_name} ({d.device_id}) {conn_icon}\n"
+
+        # 只添加在线设备到下拉框
+        if d.is_online:
+            choices.append(d.device_id)
+
+    # 如果没有在线设备，显示所有已保存设备
+    if not choices:
+        choices = [d.device_id for d in devices]
+
+    selected = app_state.current_device if app_state.current_device in choices else None
+    return result_text.strip(), gr.update(choices=choices, value=selected)
 
 
-def select_device(device_id: str) -> Tuple[str, str, str, bool]:
-    """选择设备，返回 (设备信息, 自定义名称, 备注, 是否收藏)"""
+def select_device(device_id: str) -> Tuple[str, str, str, bool, Optional[Image.Image]]:
+    """选择设备，返回 (设备信息, 自定义名称, 备注, 是否收藏, 截图)"""
     if not device_id:
-        return "请先选择一个设备", "", "", False
+        return "请先选择一个设备", "", "", False, None
 
     app_state.current_device = device_id
     app_state.device_manager.set_current_device(device_id)
     app_state.settings.device_id = device_id
     save_settings(app_state.settings)
 
-    # 获取设备详细信息（合并在线和已保存信息）
+    # 获取设备详细信息
     info = app_state.device_manager.get_device_display_info(device_id)
 
-    status_icon = "✅" if info.get("is_online") else "⚫"
+    status_icon = "🟢" if info.get("is_online") else "⚫"
     conn_type = "WiFi" if info.get("device_type") == "wifi" else "USB"
 
-    info_text = f"""{status_icon} 设备ID: {device_id}
-状态: {info.get('status', '未知')} ({conn_type})
-品牌: {info.get('brand', '未知')}
-型号: {info.get('model', '未知')}
-Android版本: {info.get('android_version', '未知')}
-SDK版本: {info.get('sdk_version', '未知')}"""
+    info_text = f"""{status_icon} {info.get('status', '未知')} ({conn_type})
+设备: {device_id}
+品牌: {info.get('brand') or '未知'}
+型号: {info.get('model') or '未知'}
+Android: {info.get('android_version') or '未知'}"""
 
-    if info.get("last_connected"):
-        info_text += f"\n最后连接: {info.get('last_connected', '')[:19]}"
+    # 同时刷新截图
+    screenshot = None
+    if info.get("is_online"):
+        success, data = app_state.device_manager.take_screenshot(device_id)
+        if success and data:
+            app_state.current_screenshot = data
+            screenshot = Image.open(io.BytesIO(data))
 
     return (
         info_text,
         info.get("custom_name", ""),
         info.get("notes", ""),
-        info.get("is_favorite", False)
+        info.get("is_favorite", False),
+        screenshot
     )
 
 
 def connect_wifi(ip_address: str):
     """WiFi连接设备"""
     if not ip_address:
-        return "请输入IP地址", gr.update()
+        return "请输入IP地址"
 
-    # 清理IP地址
     ip_address = ip_address.strip()
     if ":" not in ip_address:
         ip_address = f"{ip_address}:5555"
 
     ip, port = ip_address.rsplit(":", 1)
     success, message = app_state.device_manager.connect_remote(ip, int(port))
+
     if success:
         app_state.settings.last_wifi_address = ip_address
         save_settings(app_state.settings)
-
-    # 更新设备列表
-    devices = app_state.device_manager.get_online_devices()
-    choices = [d.device_id for d in devices]
-
-    return message, gr.update(choices=choices, value=None)
+        return f"✅ {message}"
+    return f"❌ {message}"
 
 
 def disconnect_device() -> str:
@@ -851,91 +853,103 @@ def create_app() -> gr.Blocks:
             # ============ 设备管理 Tab ============
             with gr.Tab("📱 设备管理"):
                 with gr.Row():
+                    # ===== 左侧：设备连接 =====
                     with gr.Column(scale=1):
-                        gr.Markdown("### 设备扫描")
-                        scan_btn = gr.Button("🔍 扫描USB设备", variant="primary")
-                        device_list = gr.Textbox(
-                            label="设备列表",
-                            lines=4,
-                            interactive=False,
-                        )
+                        # 设备扫描与选择
+                        with gr.Group():
+                            gr.Markdown("### 📱 设备连接")
+                            with gr.Row():
+                                scan_btn = gr.Button("🔍 扫描设备", variant="primary", scale=2)
+                                disconnect_btn = gr.Button("断开全部", scale=1)
+                            device_list = gr.Textbox(
+                                label="设备列表",
+                                lines=3,
+                                interactive=False,
+                            )
+                            device_dropdown = gr.Dropdown(
+                                label="选择设备",
+                                choices=[],
+                                interactive=True,
+                                allow_custom_value=True,
+                                value=app_state.current_device,
+                            )
+                            device_info = gr.Textbox(
+                                label="设备信息",
+                                lines=5,
+                                interactive=False,
+                            )
 
-                        gr.Markdown("### 选择设备")
-                        device_dropdown = gr.Dropdown(
-                            label="选择设备",
-                            choices=[],
-                            interactive=True,
-                            allow_custom_value=True,
-                            value=app_state.current_device,
-                        )
-                        select_btn = gr.Button("选择此设备")
-                        device_info = gr.Textbox(
-                            label="设备信息",
-                            lines=6,
-                            interactive=False,
-                        )
+                        # WiFi连接
+                        with gr.Group():
+                            gr.Markdown("### 📶 WiFi连接")
+                            with gr.Row():
+                                wifi_ip = gr.Textbox(
+                                    label="",
+                                    placeholder="IP:端口 (如 192.168.1.100:5555)",
+                                    value=app_state.settings.last_wifi_address,
+                                    scale=3,
+                                )
+                                connect_btn = gr.Button("连接", scale=1)
+                            wifi_status = gr.Textbox(
+                                label="",
+                                interactive=False,
+                                lines=1,
+                            )
 
-                        # 设备编辑区域
-                        gr.Markdown("### 设备设置")
-                        device_custom_name = gr.Textbox(
-                            label="自定义名称",
-                            placeholder="例如: 测试机A",
-                        )
-                        device_notes = gr.Textbox(
-                            label="备注",
-                            placeholder="设备用途说明...",
-                            lines=2,
-                        )
-                        device_favorite = gr.Checkbox(
-                            label="⭐ 收藏此设备",
-                            value=False,
-                        )
-                        with gr.Row():
-                            save_device_btn = gr.Button("💾 保存设置", variant="primary")
-                            delete_device_btn = gr.Button("🗑️ 删除记录", variant="stop")
-                        device_edit_status = gr.Textbox(
-                            label="",
-                            interactive=False,
-                            lines=1,
-                        )
+                        # 设备设置（折叠）
+                        with gr.Accordion("⚙️ 设备设置", open=False):
+                            device_custom_name = gr.Textbox(
+                                label="自定义名称",
+                                placeholder="例如: 测试机A",
+                            )
+                            device_notes = gr.Textbox(
+                                label="备注",
+                                placeholder="设备用途说明...",
+                                lines=2,
+                            )
+                            device_favorite = gr.Checkbox(label="⭐ 收藏此设备", value=False)
+                            with gr.Row():
+                                save_device_btn = gr.Button("💾 保存", variant="primary")
+                                delete_device_btn = gr.Button("🗑️ 删除记录", variant="stop")
+                            device_edit_status = gr.Textbox(label="", interactive=False, lines=1)
 
-                        gr.Markdown("### WiFi连接")
-                        wifi_ip = gr.Textbox(
-                            label="IP地址",
-                            placeholder="192.168.1.100:5555",
-                            value=app_state.settings.last_wifi_address,
-                        )
-                        with gr.Row():
-                            connect_btn = gr.Button("连接")
-                            disconnect_btn = gr.Button("断开")
-                        wifi_status = gr.Textbox(
-                            label="连接状态",
-                            interactive=False,
-                        )
+                        # 文件传输（折叠）
+                        with gr.Accordion("📁 文件传输", open=False):
+                            upload_files = gr.File(
+                                label="选择文件 (支持多选: APK/视频/音频/图片/文档)",
+                                file_count="multiple",
+                                file_types=[
+                                    ".apk", ".xapk",
+                                    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".3gp",
+                                    ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
+                                    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+                                    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt",
+                                    ".zip", ".rar", ".7z"
+                                ],
+                            )
+                            upload_file_info = gr.Textbox(label="文件信息", interactive=False, lines=3)
+                            upload_btn = gr.Button("📤 上传到设备", variant="primary")
+                            upload_status = gr.Textbox(label="传输结果", interactive=False, lines=3)
 
+                    # ===== 右侧：屏幕操作 =====
                     with gr.Column(scale=2):
-                        gr.Markdown("### 屏幕操作 (点击屏幕可直接操作)")
+                        gr.Markdown("### 🖥️ 屏幕操作")
                         preview_image = gr.Image(
-                            label="点击图片操作设备",
+                            label="点击屏幕直接操作",
                             type="pil",
-                            height=450,
+                            height=480,
                             interactive=True,
                         )
-                        operation_status = gr.Textbox(
-                            label="操作状态",
-                            interactive=False,
-                            lines=1,
-                        )
+                        operation_status = gr.Textbox(label="", interactive=False, lines=1)
 
                         # 导航按钮
                         with gr.Row():
-                            refresh_btn = gr.Button("🔄 刷新", scale=1)
-                            back_btn = gr.Button("◀ 返回", scale=1)
-                            home_btn = gr.Button("🏠 主页", scale=1)
-                            recent_btn = gr.Button("📋 最近", scale=1)
+                            refresh_btn = gr.Button("🔄 刷新")
+                            back_btn = gr.Button("◀ 返回")
+                            home_btn = gr.Button("🏠 主页")
+                            recent_btn = gr.Button("📋 最近")
 
                         # 滑动按钮
-                        gr.Markdown("#### 滑动操作")
                         with gr.Row():
                             swipe_up_btn = gr.Button("⬆ 上滑")
                             swipe_down_btn = gr.Button("⬇ 下滑")
@@ -943,94 +957,60 @@ def create_app() -> gr.Blocks:
                             swipe_right_btn = gr.Button("➡ 右滑")
 
                         # 文本输入
-                        gr.Markdown("#### 文本输入")
                         with gr.Row():
-                            text_input = gr.Textbox(
-                                label="",
-                                placeholder="输入文本后点击发送",
-                                scale=3,
-                            )
-                            send_text_btn = gr.Button("📤 发送", scale=1)
-                            enter_btn = gr.Button("↵ 回车", scale=1)
+                            text_input = gr.Textbox(label="", placeholder="输入文本...", scale=4)
+                            send_text_btn = gr.Button("发送", scale=1)
+                            enter_btn = gr.Button("回车", scale=1)
 
-                    with gr.Column(scale=1):
-                        gr.Markdown("### 快捷工具")
-
-                        # ADB键盘工具
-                        gr.Markdown("#### ADB键盘 (中文输入)")
-                        install_adb_kb_btn = gr.Button("📥 检查/安装 ADB键盘")
-                        enable_adb_kb_btn = gr.Button("✅ 启用 ADB键盘")
-                        open_ime_btn = gr.Button("⚙️ 打开输入法设置")
-                        list_ime_btn = gr.Button("📋 查看已安装输入法")
-                        tool_status = gr.Textbox(
-                            label="工具状态",
-                            interactive=False,
-                            lines=4,
-                        )
-
-                        # 系统工具
-                        gr.Markdown("#### 系统工具")
-                        open_settings_btn = gr.Button("⚙️ 打开系统设置")
-                        clear_cache_btn = gr.Button("🧹 清理缓存")
-
-                        # 多文件上传
-                        gr.Markdown("#### 文件传输")
-                        gr.Markdown(
-                            "支持 APK、视频、音频、图片、文档等",
-                            elem_classes=["text-sm", "text-gray-500"]
-                        )
-                        upload_files = gr.File(
-                            label="选择文件 (可多选)",
-                            file_count="multiple",
-                            file_types=[
-                                ".apk", ".xapk",
-                                ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".3gp",
-                                ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
-                                ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
-                                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt",
-                                ".zip", ".rar", ".7z"
-                            ],
-                        )
-                        upload_file_info = gr.Textbox(
-                            label="文件信息",
-                            interactive=False,
-                            lines=5,
-                        )
-                        upload_btn = gr.Button("📤 上传到设备", variant="primary")
-                        upload_status = gr.Textbox(
-                            label="传输状态",
-                            interactive=False,
-                            lines=4,
-                        )
-
-                        # 自定义命令
-                        gr.Markdown("#### 自定义ADB命令")
-                        custom_cmd = gr.Textbox(
-                            label="",
-                            placeholder="例如: shell dumpsys activity",
-                            lines=1,
-                        )
-                        run_cmd_btn = gr.Button("▶ 执行命令")
-                        cmd_output = gr.Textbox(
-                            label="命令输出",
-                            interactive=False,
-                            lines=5,
-                        )
+                        # 快捷工具（折叠）
+                        with gr.Accordion("🔧 快捷工具", open=False):
+                            with gr.Row():
+                                with gr.Column():
+                                    gr.Markdown("**ADB键盘 (中文输入)**")
+                                    install_adb_kb_btn = gr.Button("📥 检查/安装")
+                                    enable_adb_kb_btn = gr.Button("✅ 启用")
+                                    open_ime_btn = gr.Button("⚙️ 输入法设置")
+                                    list_ime_btn = gr.Button("📋 查看输入法")
+                                with gr.Column():
+                                    gr.Markdown("**系统工具**")
+                                    open_settings_btn = gr.Button("⚙️ 系统设置")
+                                    clear_cache_btn = gr.Button("🧹 清理缓存")
+                                    gr.Markdown("**自定义命令**")
+                                    custom_cmd = gr.Textbox(label="", placeholder="shell dumpsys activity")
+                                    run_cmd_btn = gr.Button("▶ 执行")
+                            tool_status = gr.Textbox(label="工具状态", interactive=False, lines=3)
+                            cmd_output = gr.Textbox(label="命令输出", interactive=False, lines=3)
 
                 # ========== 事件绑定 ==========
-                # 设备扫描和连接
+                # 设备扫描
                 scan_btn.click(
                     fn=scan_devices,
                     outputs=[device_list, device_dropdown],
                 )
 
-                select_btn.click(
+                # 选择设备时自动加载信息和刷新屏幕
+                device_dropdown.change(
                     fn=select_device,
                     inputs=[device_dropdown],
-                    outputs=[device_info, device_custom_name, device_notes, device_favorite],
+                    outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
+                )
+
+                # WiFi连接 - 连接后自动扫描
+                connect_btn.click(
+                    fn=connect_wifi,
+                    inputs=[wifi_ip],
+                    outputs=[wifi_status],
                 ).then(
-                    fn=refresh_screenshot,
-                    outputs=[preview_image],
+                    fn=scan_devices,
+                    outputs=[device_list, device_dropdown],
+                )
+
+                disconnect_btn.click(
+                    fn=disconnect_device,
+                    outputs=[wifi_status],
+                ).then(
+                    fn=scan_devices,
+                    outputs=[device_list, device_dropdown],
                 )
 
                 # 设备设置保存和删除
@@ -1046,17 +1026,6 @@ def create_app() -> gr.Blocks:
                 delete_device_btn.click(
                     fn=delete_saved_device,
                     outputs=[device_edit_status, device_list, device_dropdown],
-                )
-
-                connect_btn.click(
-                    fn=connect_wifi,
-                    inputs=[wifi_ip],
-                    outputs=[wifi_status, device_dropdown],
-                )
-
-                disconnect_btn.click(
-                    fn=disconnect_device,
-                    outputs=[wifi_status],
                 )
 
                 # 屏幕操作

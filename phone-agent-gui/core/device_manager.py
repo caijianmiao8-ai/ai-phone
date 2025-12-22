@@ -520,11 +520,14 @@ class DeviceManager:
     def get_device_display_info(self, device_id: str) -> dict:
         """获取设备的显示信息（合并在线状态和保存信息）"""
         saved = self.registry.get(device_id)
-        online_info = self.get_device_info_detail(device_id)
 
-        # 检查设备是否在线
-        devices = self.scan_devices(include_saved_offline=False)
-        is_online = any(d.device_id == device_id and d.is_online for d in devices)
+        # 直接用 adb devices 检查在线状态，不重新扫描全部
+        is_online = self._check_device_online(device_id)
+
+        # 只有在线时才获取详细信息
+        online_info = {}
+        if is_online:
+            online_info = self.get_device_info_detail(device_id)
 
         result = {
             "device_id": device_id,
@@ -560,3 +563,14 @@ class DeviceManager:
             })
 
         return result
+
+    def _check_device_online(self, device_id: str) -> bool:
+        """快速检查设备是否在线"""
+        success, output = self.adb_helper.run_command(["devices"])
+        if not success:
+            return False
+        # 检查设备ID是否在输出中且状态为device
+        for line in output.strip().split("\n"):
+            if line.startswith(device_id) and "\tdevice" in line:
+                return True
+        return False
