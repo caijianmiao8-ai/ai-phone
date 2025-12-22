@@ -5,7 +5,7 @@
 import json
 import os
 import sys
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 
@@ -38,6 +38,11 @@ class Settings:
     model_name: str = "autoglm-phone"
     max_tokens: int = 3000
     temperature: float = 0.1
+
+    # 助手规划配置（复用OpenRouter/OpenAI协议）
+    assistant_api_base: str = "https://openrouter.ai/api/v1"
+    assistant_api_key: str = ""
+    assistant_model: str = "gpt-4o-mini"
 
     # 设备配置
     device_id: Optional[str] = None
