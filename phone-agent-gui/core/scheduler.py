@@ -187,7 +187,11 @@ class SchedulerManager:
 
         with self.lock:
             job.last_run = datetime.now().isoformat()
-            job.last_status = ("✅ " if success else "❌ ") + (message or "已触发执行")
+            prefix = "✅ " if success else "❌ "
+            if message and (message.startswith("✅ ") or message.startswith("❌ ")):
+                job.last_status = message
+            else:
+                job.last_status = prefix + (message or "已触发执行")
             job.next_run = self._compute_next_run(job.rule)
             self._save_jobs()
 
@@ -195,4 +199,3 @@ class SchedulerManager:
         self.stop_event.set()
         if self.worker.is_alive():
             self.worker.join(timeout=1)
-
