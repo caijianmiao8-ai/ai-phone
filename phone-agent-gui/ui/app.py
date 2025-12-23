@@ -800,33 +800,45 @@ def _ensure_cached_devices(force_refresh: bool = False) -> List[DeviceInfo]:
     return app_state._cached_devices
 
 
-def _resolve_target_devices(target_device_ids: List[str]) -> Tuple[List[str], Optional[str]]:
-    devices = _ensure_cached_devices(force_refresh=True)
+def _resolve_target_devices(target_device_ids: List[str], force_refresh: bool = True) -> Tuple[List[str], Optional[str]]:
+    devices = _ensure_cached_devices(force_refresh=force_refresh)
     online_map = {d.device_id: d.is_online for d in devices}
+    known_device_ids = set(online_map.keys())
     default_targets = target_device_ids or ([] if not app_state.current_device else [app_state.current_device])
 
     if not default_targets:
         default_targets = [d.device_id for d in devices if d.is_online]
 
     available_devices = [d for d in default_targets if online_map.get(d)]
-    offline_selected = [d for d in default_targets if d not in online_map or not online_map[d]]
+    offline_selected = [d for d in default_targets if d in known_device_ids and not online_map.get(d)]
+    invalid_selected = [d for d in default_targets if d not in known_device_ids]
 
     if not available_devices:
         return [], "请至少选择一个在线设备"
 
     warning = None
+    warning_parts = []
     if offline_selected:
-        warning = f"已忽略离线设备: {', '.join(offline_selected)}"
+        warning_parts.append(f"已忽略离线设备: {', '.join(offline_selected)}")
+    if invalid_selected:
+        warning_parts.append(f"未找到的设备ID: {', '.join(invalid_selected)}")
+    if warning_parts:
+        warning = "；".join(warning_parts)
 
     return available_devices, warning
 
 
-def prepare_task_queue(task: str, use_knowledge: bool, device_ids: List[str]) -> Tuple[bool, str, List[str]]:
+def prepare_task_queue(
+    task: str,
+    use_knowledge: bool,
+    device_ids: List[str],
+    force_refresh_devices: bool = True,
+) -> Tuple[bool, str, List[str]]:
     """准备任务并放入队列"""
     if not task:
         return False, "请输入任务描述", []
 
-    available_devices, warning = _resolve_target_devices(device_ids)
+    available_devices, warning = _resolve_target_devices(device_ids, force_refresh=force_refresh_devices)
     if not available_devices:
         return False, "请至少选择一个在线设备", []
 
