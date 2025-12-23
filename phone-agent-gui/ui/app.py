@@ -3,6 +3,7 @@ Gradio UI 主界面
 Phone Agent GUI 的主要用户界面
 """
 import gradio as gr
+import inspect
 import threading
 import time
 import io
@@ -13,7 +14,7 @@ from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass, field
 from PIL import Image
-from typing import Optional, List, Tuple, Generator, Dict
+from typing import Optional, List, Tuple, Generator, Dict, Any, Union
 
 from config.settings import Settings, get_settings, save_settings
 from knowledge_base.manager import KnowledgeManager
@@ -24,6 +25,33 @@ from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper, TaskResult
 from core.assistant_planner import AssistantPlanner, StructuredPlan
 from core.scheduler import SchedulerManager, JobSpec
+
+
+# ==================== Gradio 版本兼容性检测 ====================
+def _detect_chatbot_format() -> str:
+    """检测 Chatbot 组件支持的消息格式"""
+    try:
+        sig = inspect.signature(gr.Chatbot.__init__)
+        if 'type' in sig.parameters:
+            # 支持 type 参数，使用 tuples 格式
+            return "tuples"
+    except Exception:
+        pass
+    # 检测默认格式：尝试创建一个测试 Chatbot
+    try:
+        # Gradio 4.x 新版本默认使用 messages 格式
+        version_parts = gr.__version__.split('.')
+        major = int(version_parts[0])
+        minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+        # Gradio 4.44+ 默认 messages，之前版本默认 tuples
+        if major >= 4 and minor >= 44:
+            return "messages"
+    except Exception:
+        pass
+    return "tuples"
+
+
+CHATBOT_FORMAT = _detect_chatbot_format()
 
 
 # 配置 Gradio 缓存目录
@@ -1084,14 +1112,25 @@ def reset_assistant_session():
     return [], "✅ 新会话已开始"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Tuple[str, str]]):
+def assistant_chat(user_msg: str, chat_history: List[Any]):
     """助手对话，返回 (更新后的历史, 清空的输入框)"""
     if not user_msg or not user_msg.strip():
         return chat_history or [], ""
 
     reply = app_state.assistant_planner.chat(user_msg)
-    # 使用 tuple 格式 (user_msg, assistant_reply) 兼容所有 Gradio 4.x 版本
-    history = (chat_history or []) + [(user_msg, reply)]
+
+    # 根据 Gradio 版本使用正确的消息格式
+    if CHATBOT_FORMAT == "messages":
+        # 新版 Gradio 使用 messages 格式
+        new_messages = [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": reply},
+        ]
+    else:
+        # 旧版 Gradio 使用 tuple 格式
+        new_messages = [(user_msg, reply)]
+
+    history = (chat_history or []) + new_messages
     return history, ""  # 返回空字符串清空输入框
 
 
@@ -1665,10 +1704,17 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 💬 智能任务规划助手")
                         gr.Markdown("告诉我你想让手机自动完成什么任务，我会帮你规划并执行。")
-                        assistant_chatbot = gr.Chatbot(
-                            height=420,
-                            label="对话记录",
-                        )
+                        # 根据 Gradio 版本创建 Chatbot
+                        chatbot_kwargs = {"height": 420, "label": "对话记录"}
+                        if CHATBOT_FORMAT == "tuples":
+                            # 尝试添加 type 参数（如果支持）
+                            try:
+                                sig = inspect.signature(gr.Chatbot.__init__)
+                                if 'type' in sig.parameters:
+                                    chatbot_kwargs["type"] = "tuples"
+                            except Exception:
+                                pass
+                        assistant_chatbot = gr.Chatbot(**chatbot_kwargs)
                         assistant_input = gr.Textbox(
                             label="",
                             placeholder="输入你的需求，按回车发送...",
