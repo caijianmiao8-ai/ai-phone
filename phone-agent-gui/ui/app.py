@@ -105,6 +105,17 @@ class AppState:
         self.assistant_planner.register_tool_handler("schedule_task", self._tool_schedule_task)
         self.assistant_planner.register_tool_handler("get_task_status", self._tool_get_task_status)
 
+    def _format_step_log(self, step_result) -> str:
+        """统一格式化步骤日志，避免访问不存在的字段"""
+        parts = []
+        if getattr(step_result, "thinking", None):
+            parts.append(f"思考: {step_result.thinking}")
+        if getattr(step_result, "action", None):
+            parts.append(f"动作: {step_result.action}")
+        if getattr(step_result, "error", None):
+            parts.append(f"错误: {step_result.error}")
+        return " | ".join(parts) if parts else "收到步骤结果"
+
     def _tool_execute_task(self, task_description: str, device_id: str = None) -> dict:
         """工具：立即执行任务"""
         if self.is_task_running:
@@ -149,7 +160,8 @@ class AppState:
                 self.set_device_agent(target_device, agent)
 
                 for step_result in agent.run_task(task_description):
-                    self.add_device_log(target_device, step_result.message)
+                    log_message = self._format_step_log(step_result)
+                    self.add_device_log(target_device, log_message)
                     if step_result.screenshot:
                         self.set_device_screenshot(target_device, step_result.screenshot)
 
