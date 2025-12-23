@@ -78,9 +78,13 @@ def main():
     setup_environment()
 
     def is_port_available(port: int) -> bool:
+        """检测端口是否可用（使用 bind 方式更准确）"""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            return s.connect_ex(("0.0.0.0", port)) != 0
+            try:
+                s.bind(("127.0.0.1", port))
+                return True
+            except OSError:
+                return False
 
     def find_available_port(preferred: int, max_tries: int = 20) -> int:
         if is_port_available(preferred):
