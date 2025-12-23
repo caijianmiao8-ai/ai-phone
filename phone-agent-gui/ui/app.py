@@ -1084,11 +1084,17 @@ def reset_assistant_session():
     return [], "✅ 新会话已开始"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Tuple[str, str]]):
-    """助手对话"""
+def assistant_chat(user_msg: str, chat_history: List[Dict[str, str]]):
+    """助手对话，返回 (更新后的历史, 清空的输入框)"""
+    if not user_msg or not user_msg.strip():
+        return chat_history or [], ""
+
     reply = app_state.assistant_planner.chat(user_msg)
-    history = (chat_history or []) + [(user_msg, reply)]
-    return history
+    history = (chat_history or []) + [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": reply},
+    ]
+    return history, ""  # 返回空字符串清空输入框
 
 
 def _format_structured_plan(plan: StructuredPlan) -> str:
@@ -1659,58 +1665,65 @@ def create_app() -> gr.Blocks:
             with gr.Tab("🤖 AI助手"):
                 with gr.Row():
                     with gr.Column(scale=2):
-                        gr.Markdown("### 对话助手")
-                        gr.Markdown("支持任意语言，助手会使用你输入的语言进行回复。")
+                        gr.Markdown("### 💬 智能任务规划助手")
+                        gr.Markdown("告诉我你想让手机自动完成什么任务，我会帮你规划并执行。")
                         assistant_chatbot = gr.Chatbot(
                             height=420,
                             label="对话记录",
+                            type="messages",
+                            placeholder="👋 你好！我是任务规划助手，告诉我你想让手机自动完成什么任务吧！",
                         )
                         assistant_input = gr.Textbox(
-                            label="输入需求",
-                            placeholder="描述你的任务或需求...",
+                            label="",
+                            placeholder="输入你的需求，按回车发送...",
+                            lines=1,
                         )
                         with gr.Row():
                             send_assistant_btn = gr.Button("发送", variant="primary")
                             reset_assistant_btn = gr.Button("🆕 新会话")
                     with gr.Column(scale=1):
-                        gr.Markdown("### 计划生成")
+                        gr.Markdown("### 📋 任务计划")
+                        gr.Markdown("*与助手对话完成后，点击下方按钮生成计划*")
                         assistant_device_selector = gr.CheckboxGroup(
-                            label="目标设备",
+                            label="目标设备（可选）",
                             choices=[],
-                            info="不选择则默认在线设备",
+                            info="不选择则使用当前在线设备",
                         )
                         time_requirement = gr.Textbox(
-                            label="时间要求/频率",
-                            placeholder="例如：每2小时、每天9点、今晚19:00执行一次",
+                            label="时间要求（可选）",
+                            placeholder="如：立即执行、每天9点、每2小时...",
                         )
-                        assistant_use_kb = gr.Checkbox(label="启用知识库", value=True)
-                        assistant_parallel = gr.Checkbox(label="并行执行", value=True)
-                        with gr.Row():
-                            plan_rule_type = gr.Dropdown(
-                                label="调度规则",
-                                choices=["once", "interval", "daily"],
-                                value="once",
-                            )
-                            plan_once_time = gr.Textbox(
-                                label="一次性时间",
-                                placeholder="2024-01-01T09:00:00",
-                            )
-                        with gr.Row():
-                            plan_interval_minutes = gr.Number(
-                                label="间隔(分钟)",
-                                value=60,
-                            )
-                            plan_daily_time = gr.Textbox(
-                                label="每日时间(HH:MM)",
-                                value="09:00",
-                            )
-                        generate_plan_btn = gr.Button("📝 生成计划清单", variant="primary")
-                        plan_preview = gr.Markdown("尚未生成计划")
+                        generate_plan_btn = gr.Button("📝 生成计划清单", variant="primary", size="lg")
+                        plan_preview = gr.Markdown("💡 先和助手对话，描述你的任务需求")
                         plan_state = gr.State({})
+
+                        with gr.Accordion("⚙️ 高级选项", open=False):
+                            assistant_use_kb = gr.Checkbox(label="启用知识库", value=True)
+                            assistant_parallel = gr.Checkbox(label="多设备并行执行", value=True)
+                            with gr.Row():
+                                plan_rule_type = gr.Dropdown(
+                                    label="调度类型",
+                                    choices=["once", "interval", "daily"],
+                                    value="once",
+                                )
+                                plan_once_time = gr.Textbox(
+                                    label="一次性时间",
+                                    placeholder="2024-01-01T09:00:00",
+                                )
+                            with gr.Row():
+                                plan_interval_minutes = gr.Number(
+                                    label="间隔(分钟)",
+                                    value=60,
+                                )
+                                plan_daily_time = gr.Textbox(
+                                    label="每日时间(HH:MM)",
+                                    value="09:00",
+                                )
+
                         with gr.Row():
-                            import_plan_btn = gr.Button("📥 导入到调度")
                             execute_plan_btn = gr.Button("⚡ 立即执行", variant="primary")
-                        plan_status = gr.Textbox(label="操作状态", interactive=False)
+                            import_plan_btn = gr.Button("📥 加入定时任务")
+                        plan_status = gr.Textbox(label="", interactive=False, lines=1)
 
             # ============ 定时任务 Tab ============
             with gr.Tab("⏰ 定时任务"):
@@ -1958,7 +1971,14 @@ def create_app() -> gr.Blocks:
             send_assistant_btn.click(
                 fn=assistant_chat,
                 inputs=[assistant_input, assistant_chatbot],
-                outputs=[assistant_chatbot],
+                outputs=[assistant_chatbot, assistant_input],
+            )
+
+            # 支持回车发送
+            assistant_input.submit(
+                fn=assistant_chat,
+                inputs=[assistant_input, assistant_chatbot],
+                outputs=[assistant_chatbot, assistant_input],
             )
 
             reset_assistant_btn.click(
