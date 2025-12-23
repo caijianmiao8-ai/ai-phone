@@ -137,8 +137,18 @@ class AppState:
                 "device_ids": available_devices or target_list,
             }
 
-        start_ok, start_message, _ = start_task_execution(parallel=True)
+        try:
+            start_ok, start_message, _ = start_task_execution(parallel=True)
+        except Exception as exc:
+            _clear_pending_task_state(available_devices or target_list)
+            return {
+                "success": False,
+                "message": f"任务启动异常: {exc}",
+                "device_ids": available_devices,
+            }
+
         if not start_ok:
+            _clear_pending_task_state(available_devices or target_list)
             return {
                 "success": False,
                 "message": start_message or "任务启动失败",
@@ -158,7 +168,7 @@ class AppState:
 
     def _tool_list_devices(self) -> dict:
         """工具：获取设备列表"""
-        devices = self.device_manager.scan_devices(include_saved_offline=True)
+        devices = self.device_manager.scan_devices(include_saved_offline=False)
         device_list = []
         for d in devices:
             device_list.append({
@@ -346,7 +356,7 @@ app_state = AppState()
 
 def scan_devices():
     """扫描设备并更新下拉框"""
-    devices = _ensure_cached_devices(force_refresh=True)
+    devices = _ensure_cached_devices(force_refresh=True, include_saved_offline=False)
 
     if not devices:
         result_text = "未发现设备\n请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
@@ -981,7 +991,7 @@ def import_knowledge(file):
 def _ensure_cached_devices(
     force_refresh: bool = False,
     include_saved_offline: bool = True,
-    cache_ttl_seconds: float = 5.0,
+    cache_ttl_seconds: float = 3.0,
 ) -> List[DeviceInfo]:
     now = time.time()
     cache_expired = (now - app_state._devices_cache_time) > cache_ttl_seconds
@@ -1026,6 +1036,16 @@ def _resolve_target_devices(target_device_ids: List[str], force_refresh: bool = 
         warning = "；".join(warning_parts)
 
     return available_devices, warning
+
+
+def _clear_pending_task_state(device_ids: List[str]):
+    """在任务准备/启动失败时清理排队状态，避免残留"""
+    with app_state.state_lock:
+        app_state.task_queue = []
+        app_state.is_task_running = False
+    for device_id in device_ids or []:
+        app_state.set_device_status(device_id, "⏸️ 空闲")
+        app_state.set_device_agent(device_id, None)
 
 
 def prepare_task_queue(
@@ -1442,11 +1462,15 @@ def manual_execute_task(task_desc: str, device_ids: List[str], use_kb: bool):
 def assistant_chat(
     user_msg: str,
     chat_history: List[Any],
-    plan_state: Optional[Dict[str, Any]],
-    selected_devices: List[str],
+    plan_state: Optional[Dict[str, Any]] = None,
+    selected_devices: Optional[List[str]] = None,
 ):
     """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框)]"""
     current_plan_state = plan_state if isinstance(plan_state, dict) else {}
+    if "pending_tool_calls" not in current_plan_state:
+        current_plan_state["pending_tool_calls"] = []
+    current_plan_state["selected_devices"] = list(selected_devices or [])
+
     if not user_msg or not user_msg.strip():
         yield chat_history or [], "", current_plan_state, ""
         return
@@ -1492,9 +1516,13 @@ def assistant_chat(
 
     final_plan_state = current_plan_state
     plan_status = ""
-    if response and response.pending_tool_calls:
-        final_plan_state = {"tool_calls": response.pending_tool_calls}
-        plan_status = response.plan_text or "请确认计划后执行。"
+    pending_calls = response.pending_tool_calls if response else []
+    if pending_calls:
+        final_plan_state = {
+            "pending_tool_calls": pending_calls,
+            "selected_devices": list(selected_devices or []),
+        }
+        plan_status = response.plan_text or "请确认计划后执行，点击“确认计划并执行”将自动完成。"
 
     yield history, "", final_plan_state, plan_status
 
@@ -1531,10 +1559,11 @@ def generate_structured_plan(devices: List[str], time_requirement: str):
 def confirm_assistant_plan(plan_state: Optional[Dict[str, Any]], chat_history: List[Any]):
     """确认并执行助手生成的工具调用计划"""
     history = list(chat_history or [])
-    pending = plan_state.get("tool_calls") if isinstance(plan_state, dict) else None
+    current_state = plan_state if isinstance(plan_state, dict) else {}
+    pending = current_state.get("pending_tool_calls") if isinstance(current_state, dict) else None
     if not pending:
-        status = "暂无待确认的计划。"
-        return history, status, {}
+        status = "暂无待确认的计划，请先让助手生成计划。"
+        return history, status, {"pending_tool_calls": [], "selected_devices": current_state.get("selected_devices", [])}
 
     messages = []
     results = []
@@ -1549,7 +1578,7 @@ def confirm_assistant_plan(plan_state: Optional[Dict[str, Any]], chat_history: L
     if summary:
         history.append({"role": "assistant", "content": summary})
 
-    return history, summary, {}
+    return history, summary, {"pending_tool_calls": [], "selected_devices": current_state.get("selected_devices", [])}
 
 
 def _build_rule(rule_type: str, run_at: str, interval_minutes: float, daily_time: str) -> Dict:

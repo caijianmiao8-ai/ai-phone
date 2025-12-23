@@ -347,6 +347,22 @@ class AssistantPlanner:
         try:
             handler = self.tool_handlers[tool_name]
             result = handler(**arguments)
+            is_success = True
+            error_message = None
+
+            if isinstance(result, dict):
+                # 规范化工具返回，优先读取 success/message 字段
+                if "success" in result:
+                    is_success = bool(result.get("success"))
+                error_message = result.get("message") or result.get("error")
+
+            if not is_success:
+                return ToolCallResult(
+                    tool_name=tool_name,
+                    status=ToolCallStatus.ERROR,
+                    result=result,
+                    error=error_message or "工具执行失败",
+                )
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.SUCCESS,
@@ -363,13 +379,44 @@ class AssistantPlanner:
         """将工具调用信息转换为可展示的计划文本"""
         if not tool_calls:
             return ""
-        parts = ["📝 计划预览："]
-        for idx, call in enumerate(tool_calls, start=1):
+        tasks = []
+        devices = set()
+        schedules = []
+        tool_descriptions = []
+
+        for call in tool_calls:
             tool_name = call.get("tool_name") or "未知工具"
             args = call.get("arguments") or {}
-            parts.append(f"{idx}. 调用 **{tool_name}**，参数：`{json.dumps(args, ensure_ascii=False)}`")
-        parts.append("请确认后再执行以上操作。")
-        return "\n".join(parts)
+            tool_descriptions.append(f"{tool_name}：{json.dumps(args, ensure_ascii=False)}")
+
+            if tool_name == "execute_task":
+                task_desc = args.get("task_description")
+                if task_desc:
+                    tasks.append(str(task_desc))
+                device_ids = args.get("device_ids") or ([] if not args.get("device_id") else [args.get("device_id")])
+                devices.update(str(d) for d in device_ids if d)
+
+            if tool_name == "schedule_task":
+                task_desc = args.get("task_description")
+                if task_desc:
+                    tasks.append(str(task_desc))
+                device_ids = args.get("device_ids") or []
+                devices.update(str(d) for d in device_ids if d)
+                schedule_type = args.get("schedule_type") or "once"
+                schedule_value = args.get("schedule_value") or "-"
+                schedules.append(f"{schedule_type}: {schedule_value}")
+
+        device_text = ", ".join(sorted(devices)) if devices else "未指定（默认使用在线设备）"
+        plan_rows = [
+            "| 项 | 内容 |",
+            "| --- | --- |",
+            f"| 任务 | {'；'.join(tasks) if tasks else '未提供'} |",
+            f"| 设备 | {device_text} |",
+            f"| 调度 | {'；'.join(schedules) if schedules else '立即执行'} |",
+            f"| 工具调用 | {'；'.join(tool_descriptions) if tool_descriptions else '无'} |",
+            "| 操作 | 点击“确认计划并执行”后将自动完成以上步骤，无需再次确认。 |",
+        ]
+        return "\n".join(plan_rows)
 
     def chat(self, user_msg: str, context_messages: Optional[List[Dict[str, str]]] = None) -> str:
         """对话模式，返回助手回复（兼容旧接口）"""
