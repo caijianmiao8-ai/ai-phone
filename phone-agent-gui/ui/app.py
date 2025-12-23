@@ -82,6 +82,8 @@ class AppState:
         self.task_logs: List[str] = []
         # 缓存当前设备列表
         self._cached_devices: List[DeviceInfo] = []
+        self._cached_devices_include_offline: bool = True
+        self._devices_cache_time: float = 0.0
         # 多设备任务状态
         self.device_states: Dict[str, DeviceTaskState] = defaultdict(DeviceTaskState)
         self.state_lock = threading.Lock()
@@ -976,14 +978,30 @@ def import_knowledge(file):
 
 # ==================== 任务执行面板 ====================
 
-def _ensure_cached_devices(force_refresh: bool = False) -> List[DeviceInfo]:
-    if force_refresh or not app_state._cached_devices:
-        app_state._cached_devices = app_state.device_manager.scan_devices()
+def _ensure_cached_devices(
+    force_refresh: bool = False,
+    include_saved_offline: bool = True,
+    cache_ttl_seconds: float = 5.0,
+) -> List[DeviceInfo]:
+    now = time.time()
+    cache_expired = (now - app_state._devices_cache_time) > cache_ttl_seconds
+    include_changed = include_saved_offline != getattr(app_state, "_cached_devices_include_offline", True)
+
+    if force_refresh or cache_expired or not app_state._cached_devices or include_changed:
+        app_state._cached_devices = app_state.device_manager.scan_devices(
+            include_saved_offline=include_saved_offline
+        )
+        app_state._devices_cache_time = now
+        app_state._cached_devices_include_offline = include_saved_offline
+
     return app_state._cached_devices
 
 
 def _resolve_target_devices(target_device_ids: List[str], force_refresh: bool = True) -> Tuple[List[str], Optional[str]]:
-    devices = _ensure_cached_devices(force_refresh=force_refresh)
+    devices = _ensure_cached_devices(
+        force_refresh=force_refresh,
+        include_saved_offline=False,
+    )
     online_map = {d.device_id: d.is_online for d in devices}
     known_device_ids = set(online_map.keys())
     default_targets = target_device_ids or ([] if not app_state.current_device else [app_state.current_device])
@@ -1306,7 +1324,10 @@ def _ensure_scheduler() -> SchedulerManager:
 
 def _build_device_context_message(selected_devices: Optional[List[str]] = None) -> str:
     """构造设备上下文，传递给助手提示可用设备"""
-    devices = _ensure_cached_devices(force_refresh=True)
+    devices = _ensure_cached_devices(
+        force_refresh=True,
+        include_saved_offline=False,
+    )
     if not devices:
         return "设备状态：当前未发现任何可用设备，请提醒用户先连接设备。"
 
@@ -1358,7 +1379,7 @@ def reset_assistant_session():
     """重置助手会话"""
     app_state.assistant_planner.start_session()
     app_state.latest_plan = None
-    return [], "✅ 新会话已开始", {}
+    return [], "", {}, "✅ 新会话已开始"
 
 
 def render_task_status_for_assistant() -> str:
@@ -1368,6 +1389,15 @@ def render_task_status_for_assistant() -> str:
     else:
         status_parts = []
 
+    devices = _ensure_cached_devices(
+        force_refresh=True,
+        include_saved_offline=False,
+    )
+    device_display_map = {
+        d.device_id: (d.display_name if d.display_name != d.device_id else d.device_id)
+        for d in devices
+    }
+
     states = app_state.snapshot_states()
     if not states:
         if not app_state.is_task_running:
@@ -1376,11 +1406,7 @@ def render_task_status_for_assistant() -> str:
 
     for device_id, state in states.items():
         # 获取设备显示名
-        display_name = device_id
-        for d in app_state._cached_devices:
-            if d.device_id == device_id:
-                display_name = d.display_name if d.display_name != device_id else device_id
-                break
+        display_name = device_display_map.get(device_id, device_id)
 
         status_parts.append(f"**{display_name}**")
         status_parts.append(f"- 状态: {state.status}")
@@ -1413,10 +1439,16 @@ def manual_execute_task(task_desc: str, device_ids: List[str], use_kb: bool):
         return f"❌ {result.get('message', '执行失败')}"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Any], selected_devices: List[str]):
+def assistant_chat(
+    user_msg: str,
+    chat_history: List[Any],
+    plan_state: Optional[Dict[str, Any]],
+    selected_devices: List[str],
+):
     """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框)]"""
+    current_plan_state = plan_state if isinstance(plan_state, dict) else {}
     if not user_msg or not user_msg.strip():
-        yield chat_history or [], "", plan_state or {}, ""
+        yield chat_history or [], "", current_plan_state, ""
         return
 
     device_context = _build_device_context_message(selected_devices)
@@ -1441,14 +1473,14 @@ def assistant_chat(user_msg: str, chat_history: List[Any], selected_devices: Lis
                 chunk = next(stream)
                 assistant_content += chunk
                 history[-1]["content"] = assistant_content
-                yield history, "", plan_state or {}, ""
+                yield history, "", current_plan_state, ""
             except StopIteration as stop:
                 response = stop.value
                 break
     except Exception as e:
         error_msg = f"❌ 助手调用失败: {str(e)}"
         history[-1]["content"] = error_msg
-        yield history, "", plan_state or {}, error_msg
+        yield history, "", current_plan_state, error_msg
         return
 
     # 确保最终状态
@@ -1458,13 +1490,13 @@ def assistant_chat(user_msg: str, chat_history: List[Any], selected_devices: Lis
         if response and response.plan_text:
             history[-1]["content"] = assistant_content
 
-    new_plan_state = {}
+    final_plan_state = current_plan_state
     plan_status = ""
     if response and response.pending_tool_calls:
-        new_plan_state = {"tool_calls": response.pending_tool_calls}
+        final_plan_state = {"tool_calls": response.pending_tool_calls}
         plan_status = response.plan_text or "请确认计划后执行。"
 
-    yield history, "", new_plan_state, plan_status
+    yield history, "", final_plan_state, plan_status
 
 
 def _format_structured_plan(plan: StructuredPlan) -> str:
@@ -1482,7 +1514,11 @@ def _format_structured_plan(plan: StructuredPlan) -> str:
 def generate_structured_plan(devices: List[str], time_requirement: str):
     """生成结构化计划"""
     device_context = _build_device_context_message(devices)
-    preferred_devices = devices or [d.device_id for d in _ensure_cached_devices(force_refresh=True) if d.is_online]
+    preferred_devices = devices or [
+        d.device_id
+        for d in _ensure_cached_devices(force_refresh=True, include_saved_offline=False)
+        if d.is_online
+    ]
     plan = app_state.assistant_planner.summarize_plan(
         preferred_devices,
         time_requirement,
@@ -1492,7 +1528,7 @@ def generate_structured_plan(devices: List[str], time_requirement: str):
     return _format_structured_plan(plan), plan.to_dict()
 
 
-def confirm_assistant_plan(plan_state: Dict[str, Any], chat_history: List[Any]):
+def confirm_assistant_plan(plan_state: Optional[Dict[str, Any]], chat_history: List[Any]):
     """确认并执行助手生成的工具调用计划"""
     history = list(chat_history or [])
     pending = plan_state.get("tool_calls") if isinstance(plan_state, dict) else None
@@ -2362,20 +2398,29 @@ def create_app() -> gr.Blocks:
             # AI 助手事件
             send_assistant_btn.click(
                 fn=assistant_chat,
-                inputs=[assistant_input, assistant_chatbot, assistant_device_selector],
-                outputs=[assistant_chatbot, assistant_input],
+                inputs=[assistant_input, assistant_chatbot, plan_state, assistant_device_selector],
+                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
             )
 
             # 支持回车发送
             assistant_input.submit(
                 fn=assistant_chat,
-                inputs=[assistant_input, assistant_chatbot, assistant_device_selector],
-                outputs=[assistant_chatbot, assistant_input],
+                inputs=[assistant_input, assistant_chatbot, plan_state, assistant_device_selector],
+                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
+            )
+
+            confirm_assistant_plan_btn.click(
+                fn=confirm_assistant_plan,
+                inputs=[plan_state, assistant_chatbot],
+                outputs=[assistant_chatbot, plan_status, plan_state],
+            ).then(
+                fn=render_task_status_for_assistant,
+                outputs=[task_status_display],
             )
 
             reset_assistant_btn.click(
                 fn=reset_assistant_session,
-                outputs=[assistant_chatbot, plan_status, plan_state],
+                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
             ).then(
                 fn=render_task_status_for_assistant,
                 outputs=[task_status_display],
