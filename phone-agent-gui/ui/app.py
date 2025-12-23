@@ -137,13 +137,12 @@ class AppState:
                 self.add_device_log(target_device, f"开始执行: {task_description}")
 
                 agent = AgentWrapper(
-                    api_base=self.settings.api_base_url,
+                    api_base_url=self.settings.api_base_url,
                     api_key=self.settings.api_key,
                     model_name=self.settings.model_name,
                     device_id=target_device,
                     device_type=self.settings.device_type,
                     knowledge_manager=self.knowledge_manager if self.settings.knowledge_base_enabled else None,
-                    adb_path=self.adb_helper.get_adb_path(),
                     language=self.settings.language,
                     max_steps=self.settings.max_steps,
                 )
@@ -222,13 +221,8 @@ class AppState:
 
         if not self.scheduler:
             self.scheduler = SchedulerManager(
-                lambda spec: self._run_scheduled_task(spec),
-                config_dir=os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "config"
-                )
+                task_executor=lambda spec: self._run_scheduled_task(spec)
             )
-            self.scheduler.start()
 
         # 构建调度规则
         rule = {"type": schedule_type}
@@ -286,10 +280,30 @@ class AppState:
                 "devices": all_status,
             }
 
-    def _run_scheduled_task(self, spec: JobSpec):
-        """执行定时任务的回调"""
+    def _run_scheduled_task(self, spec: JobSpec) -> Tuple[bool, str]:
+        """执行定时任务的回调，返回 (success, message)"""
+        if not spec.device_ids:
+            return False, "没有指定设备"
+
+        success_count = 0
+        fail_count = 0
+        messages = []
+
         for device_id in spec.device_ids:
-            self._tool_execute_task(spec.description, device_id)
+            result = self._tool_execute_task(spec.description, device_id)
+            if result.get("success"):
+                success_count += 1
+                messages.append(f"{device_id}: 已启动")
+            else:
+                fail_count += 1
+                messages.append(f"{device_id}: {result.get('message', '失败')}")
+
+        if fail_count == 0:
+            return True, f"在 {success_count} 个设备上启动成功"
+        elif success_count == 0:
+            return False, f"全部失败: {'; '.join(messages)}"
+        else:
+            return True, f"部分成功 ({success_count}/{success_count + fail_count})"
 
     def add_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
