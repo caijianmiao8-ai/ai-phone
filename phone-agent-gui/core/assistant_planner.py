@@ -97,7 +97,7 @@ class AssistantPlanner:
             )
         return "如果无法判断语言，请使用简洁的双语（中文/English）回应用户。"
 
-    def chat(self, user_msg: str) -> str:
+    def chat(self, user_msg: str, context_messages: Optional[List[Dict[str, str]]] = None) -> str:
         """对话模式，返回助手回复"""
         if not user_msg:
             return "请先输入问题或需求。"
@@ -105,7 +105,10 @@ class AssistantPlanner:
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "system", "content": self._get_language_hint(user_msg)},
-        ] + self.history + [{"role": "user", "content": user_msg}]
+        ]
+        if context_messages:
+            messages.extend(context_messages)
+        messages += self.history + [{"role": "user", "content": user_msg}]
 
         try:
             client = self._get_client()
@@ -122,7 +125,12 @@ class AssistantPlanner:
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
-    def summarize_plan(self, devices: List[str], time_requirement: str = "") -> StructuredPlan:
+    def summarize_plan(
+        self,
+        devices: List[str],
+        time_requirement: str = "",
+        context_messages: Optional[List[Dict[str, str]]] = None,
+    ) -> StructuredPlan:
         """
         基于当前对话生成结构化计划
         返回 StructuredPlan，包含任务描述、目标设备、时间窗口/频率
@@ -139,7 +147,10 @@ class AssistantPlanner:
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": self._get_language_hint(None)},
-        ] + self.history
+        ]
+        if context_messages:
+            messages.extend(context_messages)
+        messages += self.history
         if devices:
             messages.append(
                 {"role": "user", "content": f"当前用户选择的设备: {', '.join(devices)}"}

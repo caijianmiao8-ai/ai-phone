@@ -162,8 +162,7 @@ app_state = AppState()
 
 def scan_devices():
     """扫描设备并更新下拉框"""
-    devices = app_state.device_manager.scan_devices()
-    app_state._cached_devices = devices
+    devices = _ensure_cached_devices(force_refresh=True)
 
     if not devices:
         result_text = "未发现设备\n请确保:\n1. 手机已通过USB连接\n2. 已开启USB调试\n3. 已在手机上授权调试"
@@ -795,14 +794,14 @@ def import_knowledge(file):
 
 # ==================== 任务执行面板 ====================
 
-def _ensure_cached_devices() -> List[DeviceInfo]:
-    if not app_state._cached_devices:
+def _ensure_cached_devices(force_refresh: bool = False) -> List[DeviceInfo]:
+    if force_refresh or not app_state._cached_devices:
         app_state._cached_devices = app_state.device_manager.scan_devices()
     return app_state._cached_devices
 
 
 def _resolve_target_devices(target_device_ids: List[str]) -> Tuple[List[str], Optional[str]]:
-    devices = _ensure_cached_devices()
+    devices = _ensure_cached_devices(force_refresh=True)
     online_map = {d.device_id: d.is_online for d in devices}
     default_targets = target_device_ids or ([] if not app_state.current_device else [app_state.current_device])
 
@@ -923,6 +922,37 @@ def start_task_execution(parallel: bool = True):
     return True, "任务已启动", {"threads": threads, "results": results, "devices": job["device_ids"]}
 
 
+def _wait_for_task_threads(threads: Optional[List[threading.Thread]]):
+    """等待任务线程结束"""
+    if not threads:
+        return
+    for t in threads:
+        t.join()
+
+
+def _collect_execution_outcome(
+    results: Dict[str, Optional[TaskResult]],
+    devices: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
+    """根据执行结果汇总最终状态，并重置运行标记"""
+    target_devices = devices or list(results.keys())
+    failures = []
+
+    for device_id in target_devices:
+        res = results.get(device_id)
+        if res is None or (res and not res.success):
+            failures.append(device_id)
+
+    for device_id, state in app_state.snapshot_states().items():
+        if device_id in target_devices and state.status.startswith("❌") and device_id not in failures:
+            failures.append(device_id)
+
+    app_state.is_task_running = False
+    success = not failures
+    final_status = "✅ 所有设备完成" if success else f"❌ 部分设备失败: {', '.join(failures)}"
+    return success, final_status
+
+
 def _render_device_status_board() -> str:
     states = app_state.snapshot_states()
     if not states:
@@ -1003,20 +1033,8 @@ def run_task(task: str, use_knowledge: bool, device_ids: List[str]):
         time.sleep(0.5)
         yield "🔄 任务执行中...", _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
 
-    if threads:
-        for t in threads:
-            t.join()
-
-    failures = []
-    for device_id, res in results.items():
-        if res is None or (res and not res.success):
-            failures.append(device_id)
-    for device_id, state in app_state.snapshot_states().items():
-        if state.status.startswith("❌") and device_id not in failures and device_id in results:
-            failures.append(device_id)
-    final_status = "✅ 所有设备完成" if not failures else f"❌ 部分设备失败: {', '.join(failures)}"
-    app_state.is_task_running = False
-
+    _wait_for_task_threads(threads)
+    _, final_status = _collect_execution_outcome(results, devices)
     yield final_status, _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
 
 
@@ -1063,18 +1081,59 @@ def _ensure_scheduler() -> SchedulerManager:
         return app_state.scheduler
 
     def _task_executor(job: JobSpec):
-        success, message, target_devices = prepare_task_queue(
+        success, warning, target_devices = prepare_task_queue(
             job.description, job.use_knowledge, job.device_ids
         )
         if not success:
-            return False, message
-        start_ok, start_message, _ = start_task_execution(parallel=job.parallel)
-        if not start_ok:
-            return False, start_message
-        return True, start_message or "任务已启动"
+            return False, warning
+
+        start_ok, start_message, context = start_task_execution(parallel=job.parallel)
+        if not start_ok or context is None:
+            if start_ok and app_state.is_task_running:
+                app_state.is_task_running = False
+            return False, start_message or "任务启动失败"
+
+        _wait_for_task_threads(context.get("threads"))
+        success, final_status = _collect_execution_outcome(
+            context.get("results", {}), context.get("devices", target_devices)
+        )
+
+        status_parts = [start_message or ""]
+        if warning and warning != start_message:
+            status_parts.append(warning)
+        status_prefix = " | ".join([p for p in status_parts if p])
+        if status_prefix:
+            final_status = f"{status_prefix} → {final_status}"
+        return success, final_status
 
     app_state.scheduler = SchedulerManager(task_executor=_task_executor)
     return app_state.scheduler
+
+
+def _build_device_context_message() -> str:
+    """构造设备上下文，传递给助手提示可用设备"""
+    devices = _ensure_cached_devices(force_refresh=True)
+    if not devices:
+        return "设备状态：当前未发现任何可用设备，请在生成计划时提醒用户先连接设备。"
+
+    online = [
+        f"{d.full_display_name}"
+        for d in devices
+        if d.is_online
+    ]
+    offline = [
+        f"{d.full_display_name}（{d.status_text}）"
+        for d in devices
+        if not d.is_online
+    ]
+
+    online_text = ", ".join(online) if online else "无在线设备"
+    offline_text = ", ".join(offline) if offline else "无离线设备"
+    return (
+        "当前设备状态（系统自动提供）："
+        f"在线设备: {online_text}；离线/未授权: {offline_text}。"
+        "请优先选择在线设备 ID 安排任务。"
+    )
 
 
 def reset_assistant_session():
@@ -1089,7 +1148,11 @@ def assistant_chat(user_msg: str, chat_history: List[Any]):
     if not user_msg or not user_msg.strip():
         return chat_history or [], ""
 
-    reply = app_state.assistant_planner.chat(user_msg)
+    device_context = _build_device_context_message()
+    reply = app_state.assistant_planner.chat(
+        user_msg,
+        context_messages=[{"role": "system", "content": device_context}],
+    )
 
     # 使用 messages 格式（Gradio 4.44+ 默认格式）
     new_messages = [
@@ -1114,7 +1177,13 @@ def _format_structured_plan(plan: StructuredPlan) -> str:
 
 def generate_structured_plan(devices: List[str], time_requirement: str):
     """生成结构化计划"""
-    plan = app_state.assistant_planner.summarize_plan(devices, time_requirement)
+    device_context = _build_device_context_message()
+    preferred_devices = devices or [d.device_id for d in _ensure_cached_devices(force_refresh=True) if d.is_online]
+    plan = app_state.assistant_planner.summarize_plan(
+        preferred_devices,
+        time_requirement,
+        context_messages=[{"role": "system", "content": device_context}],
+    )
     app_state.latest_plan = plan
     return _format_structured_plan(plan), plan.to_dict()
 
