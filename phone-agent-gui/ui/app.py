@@ -143,7 +143,7 @@ class AppState:
                     device_id=target_device,
                     device_type=self.settings.device_type,
                     knowledge_manager=self.knowledge_manager if self.settings.knowledge_base_enabled else None,
-                    adb_path=self.adb_helper.adb_path,
+                    adb_path=self.adb_helper.get_adb_path(),
                     language=self.settings.language,
                     max_steps=self.settings.max_steps,
                 )
@@ -243,11 +243,12 @@ class AppState:
             devices = self.device_manager.scan_devices(include_saved_offline=False)
             targets = [d.device_id for d in devices if d.is_online]
 
-        job_id = self.scheduler.add_job(
-            description=task_description,
-            device_ids=targets,
-            rule=rule,
-        )
+        job = self.scheduler.add_job({
+            "description": task_description,
+            "device_ids": targets,
+            "rule": rule,
+        })
+        job_id = job.id
 
         return {
             "success": True,
