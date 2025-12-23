@@ -120,17 +120,26 @@ class SchedulerManager:
             return list(self.jobs.values())
 
     # ---------------- 运行循环 ----------------
-    def _compute_next_run(self, rule: Dict[str, Any]) -> Optional[str]:
-        """根据规则计算下次执行时间（ISO字符串）"""
+    def _compute_next_run(self, rule: Dict[str, Any], is_reschedule: bool = False) -> Optional[str]:
+        """
+        根据规则计算下次执行时间（ISO字符串）
+        Args:
+            rule: 调度规则
+            is_reschedule: 是否是任务执行后的重新调度
+        """
         try:
             now = datetime.now()
             rule_type = (rule.get("type") or "").lower()
 
             if rule_type == "once":
+                # 一次性任务：执行后不再调度
+                if is_reschedule:
+                    return None
                 run_at = rule.get("run_at")
                 if run_at:
                     dt = datetime.fromisoformat(run_at)
                     if dt < now:
+                        # 如果时间已过，立即执行（仅首次）
                         dt = now
                     return dt.isoformat()
 
@@ -192,7 +201,8 @@ class SchedulerManager:
                 job.last_status = message
             else:
                 job.last_status = prefix + (message or "已触发执行")
-            job.next_run = self._compute_next_run(job.rule)
+            # 执行后重新调度，一次性任务会返回 None
+            job.next_run = self._compute_next_run(job.rule, is_reschedule=True)
             self._save_jobs()
 
     def shutdown(self):
