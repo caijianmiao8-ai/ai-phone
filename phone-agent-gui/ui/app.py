@@ -1084,10 +1084,13 @@ def reset_assistant_session():
     return [], "✅ 新会话已开始"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Tuple[str, str]]):
+def assistant_chat(user_msg: str, chat_history: List[Dict[str, str]]):
     """助手对话"""
     reply = app_state.assistant_planner.chat(user_msg)
-    history = (chat_history or []) + [(user_msg, reply)]
+    history = (chat_history or []) + [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": reply},
+    ]
     return history
 
 
@@ -1661,7 +1664,11 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 对话助手")
                         gr.Markdown("支持任意语言，助手会使用你输入的语言进行回复。")
-                        assistant_chatbot = gr.Chatbot(height=420, label="对话记录")
+                        assistant_chatbot = gr.Chatbot(
+                            height=420,
+                            label="对话记录",
+                            type="messages",
+                        )
                         assistant_input = gr.Textbox(
                             label="输入需求",
                             placeholder="描述你的任务或需求...",
