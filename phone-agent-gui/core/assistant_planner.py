@@ -58,12 +58,16 @@ class ChatResponse:
     content: str = ""
     tool_calls: List[ToolCallResult] = field(default_factory=list)
     has_tool_call: bool = False
+    plan_text: str = ""
+    pending_tool_calls: List[Dict[str, Any]] = field(default_factory=list)
 
     def get_display_message(self) -> str:
         """获取用于显示的消息"""
         parts = []
         if self.content:
             parts.append(self.content)
+        if self.plan_text:
+            parts.append(self.plan_text)
         for tc in self.tool_calls:
             parts.append(tc.to_message())
         return "\n\n".join(parts) if parts else ""
@@ -175,13 +179,14 @@ AVAILABLE_TOOLS = [
 class AssistantPlanner:
     """封装对话式规划，支持 Tool Calling，维护历史并输出结构化计划"""
 
-    def __init__(self, api_base: str, api_key: str, model: str):
+    def __init__(self, api_base: str, api_key: str, model: str, require_confirmation: bool = True):
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
         self.history: List[Dict[str, Any]] = []
         self.tool_handlers: Dict[str, Callable] = {}
         self.enable_tools = True
+        self.require_confirmation = require_confirmation
 
         self.system_prompt = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
 
@@ -218,14 +223,14 @@ class AssistantPlanner:
 
 ## 对话流程
 1. 理解用户需求，必要时追问细节
-2. 信息充足后，直接调用相应工具执行
-3. 向用户反馈执行结果
+2. 信息充足后，先输出将要执行的计划，等待用户确认后再调用工具
+3. 在获得用户确认后执行相应工具，并向用户反馈执行结果
 
 ## 对话风格
 - 友好、简洁、专业
 - 主动引导，一次只问一个问题
 - 使用与用户相同的语言回复
-- 当信息充足时，主动调用工具执行，无需用户额外确认"""
+- 当信息充足时，先输出计划并等待用户确认后再执行"""
 
         self.system_prompt_no_tools = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
 
@@ -287,11 +292,13 @@ class AssistantPlanner:
         """注册工具处理函数"""
         self.tool_handlers[tool_name] = handler
 
-    def update_config(self, api_base: str, api_key: str, model: str):
+    def update_config(self, api_base: str, api_key: str, model: str, require_confirmation: Optional[bool] = None):
         """更新接口配置"""
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
+        if require_confirmation is not None:
+            self.require_confirmation = require_confirmation
 
     def _get_client(self) -> OpenAI:
         return OpenAI(
@@ -347,6 +354,18 @@ class AssistantPlanner:
                 error=str(e)
             )
 
+    def _build_plan_text(self, tool_calls: List[Dict[str, Any]]) -> str:
+        """将工具调用信息转换为可展示的计划文本"""
+        if not tool_calls:
+            return ""
+        parts = ["📝 计划预览："]
+        for idx, call in enumerate(tool_calls, start=1):
+            tool_name = call.get("tool_name") or "未知工具"
+            args = call.get("arguments") or {}
+            parts.append(f"{idx}. 调用 **{tool_name}**，参数：`{json.dumps(args, ensure_ascii=False)}`")
+        parts.append("请确认后再执行以上操作。")
+        return "\n".join(parts)
+
     def chat(self, user_msg: str, context_messages: Optional[List[Dict[str, str]]] = None) -> str:
         """对话模式，返回助手回复（兼容旧接口）"""
         response = self.chat_with_tools(user_msg, context_messages)
@@ -395,6 +414,8 @@ class AssistantPlanner:
             message = response.choices[0].message
             content = (message.content or "").strip()
             tool_calls_results = []
+            pending_tool_calls: List[Dict[str, Any]] = []
+            plan_text = ""
 
             # 处理工具调用
             if hasattr(message, 'tool_calls') and message.tool_calls:
@@ -405,8 +426,21 @@ class AssistantPlanner:
                     except json.JSONDecodeError:
                         arguments = {}
 
-                    result = self._execute_tool(tool_name, arguments)
-                    tool_calls_results.append(result)
+                    if self.require_confirmation:
+                        pending_tool_calls.append({
+                            "tool_name": tool_name,
+                            "arguments": arguments,
+                        })
+                    else:
+                        result = self._execute_tool(tool_name, arguments)
+                        tool_calls_results.append(result)
+
+            if self.require_confirmation and pending_tool_calls:
+                plan_text = self._build_plan_text(pending_tool_calls)
+                if content:
+                    content = f"{content}\n\n{plan_text}"
+                else:
+                    content = plan_text
 
             # 更新历史
             self.history.append({"role": "user", "content": user_msg})
@@ -416,7 +450,9 @@ class AssistantPlanner:
             return ChatResponse(
                 content=content,
                 tool_calls=tool_calls_results,
-                has_tool_call=len(tool_calls_results) > 0
+                has_tool_call=len(tool_calls_results) > 0 or len(pending_tool_calls) > 0,
+                plan_text=plan_text,
+                pending_tool_calls=pending_tool_calls,
             )
 
         except Exception as e:
@@ -495,6 +531,8 @@ class AssistantPlanner:
 
             # 执行工具调用
             tool_calls_results = []
+            pending_tool_calls: List[Dict[str, Any]] = []
+
             for idx in sorted(tool_calls_data.keys()):
                 tc_data = tool_calls_data[idx]
                 tool_name = tc_data["name"]
@@ -503,9 +541,22 @@ class AssistantPlanner:
                 except json.JSONDecodeError:
                     arguments = {}
 
-                result = self._execute_tool(tool_name, arguments)
-                tool_calls_results.append(result)
-                yield f"\n\n{result.to_message()}"
+                if self.require_confirmation:
+                    pending_tool_calls.append({
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                    })
+                else:
+                    result = self._execute_tool(tool_name, arguments)
+                    tool_calls_results.append(result)
+                    yield f"\n\n{result.to_message()}"
+
+            plan_text = ""
+            if self.require_confirmation and pending_tool_calls:
+                plan_text = self._build_plan_text(pending_tool_calls)
+                if plan_text:
+                    full_content = f"{full_content}\n\n{plan_text}"
+                    yield f"\n\n{plan_text}"
 
             # 更新历史
             self.history.append({"role": "user", "content": user_msg})
@@ -515,7 +566,9 @@ class AssistantPlanner:
             return ChatResponse(
                 content=full_content,
                 tool_calls=tool_calls_results,
-                has_tool_call=len(tool_calls_results) > 0
+                has_tool_call=len(tool_calls_results) > 0 or len(pending_tool_calls) > 0,
+                plan_text=plan_text,
+                pending_tool_calls=pending_tool_calls,
             )
 
         except Exception as e:

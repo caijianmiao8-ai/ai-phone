@@ -91,6 +91,7 @@ class AppState:
             api_base=self.settings.assistant_api_base,
             api_key=self.settings.assistant_api_key,
             model=self.settings.assistant_model,
+            require_confirmation=self.settings.assistant_require_confirmation,
         )
         self.scheduler: Optional[SchedulerManager] = None
         self.latest_plan: Optional[StructuredPlan] = None
@@ -345,6 +346,7 @@ class AppState:
             api_base=self.settings.assistant_api_base,
             api_key=self.settings.assistant_api_key,
             model=self.settings.assistant_model,
+            require_confirmation=self.settings.assistant_require_confirmation,
         )
 
     def get_device_logs(self, device_id: str) -> str:
@@ -1372,7 +1374,7 @@ def reset_assistant_session():
     """重置助手会话"""
     app_state.assistant_planner.start_session()
     app_state.latest_plan = None
-    return [], "✅ 新会话已开始"
+    return [], "✅ 新会话已开始", {}
 
 
 def render_task_status_for_assistant() -> str:
@@ -1424,10 +1426,10 @@ def manual_execute_task(task_desc: str, device_ids: List[str], use_kb: bool):
         return f"❌ {result.get('message', '执行失败')}"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Any]):
-    """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框)]"""
+def assistant_chat(user_msg: str, chat_history: List[Any], plan_state: Dict[str, Any]):
+    """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框, 计划状态, 状态文本)]"""
     if not user_msg or not user_msg.strip():
-        yield chat_history or [], ""
+        yield chat_history or [], "", plan_state or {}, ""
         return
 
     device_context = _build_device_context_message()
@@ -1440,24 +1442,42 @@ def assistant_chat(user_msg: str, chat_history: List[Any]):
     assistant_content = ""
     history.append({"role": "assistant", "content": ""})
 
+    response: Optional[ChatResponse] = None
+
     try:
-        for chunk in app_state.assistant_planner.chat_stream(
+        stream = app_state.assistant_planner.chat_stream(
             user_msg,
             context_messages=[{"role": "system", "content": device_context}],
-        ):
-            assistant_content += chunk
-            history[-1]["content"] = assistant_content
-            yield history, ""
+        )
+        while True:
+            try:
+                chunk = next(stream)
+                assistant_content += chunk
+                history[-1]["content"] = assistant_content
+                yield history, "", plan_state or {}, ""
+            except StopIteration as stop:
+                response = stop.value
+                break
     except Exception as e:
         error_msg = f"❌ 助手调用失败: {str(e)}"
         history[-1]["content"] = error_msg
-        yield history, ""
+        yield history, "", plan_state or {}, error_msg
         return
 
     # 确保最终状态
     if not assistant_content:
         history[-1]["content"] = "（助手无回复）"
-    yield history, ""
+    else:
+        if response and response.plan_text:
+            history[-1]["content"] = assistant_content
+
+    new_plan_state = {}
+    plan_status = ""
+    if response and response.pending_tool_calls:
+        new_plan_state = {"tool_calls": response.pending_tool_calls}
+        plan_status = response.plan_text or "请确认计划后执行。"
+
+    yield history, "", new_plan_state, plan_status
 
 
 def _format_structured_plan(plan: StructuredPlan) -> str:
@@ -1483,6 +1503,30 @@ def generate_structured_plan(devices: List[str], time_requirement: str):
     )
     app_state.latest_plan = plan
     return _format_structured_plan(plan), plan.to_dict()
+
+
+def confirm_assistant_plan(plan_state: Dict[str, Any], chat_history: List[Any]):
+    """确认并执行助手生成的工具调用计划"""
+    history = list(chat_history or [])
+    pending = plan_state.get("tool_calls") if isinstance(plan_state, dict) else None
+    if not pending:
+        status = "暂无待确认的计划。"
+        return history, status, {}
+
+    messages = []
+    results = []
+    for call in pending:
+        tool_name = call.get("tool_name")
+        arguments = call.get("arguments") or {}
+        result = app_state.assistant_planner._execute_tool(tool_name, arguments)  # noqa: SLF001
+        results.append(result)
+        messages.append(result.to_message())
+
+    summary = "\n".join(messages) if messages else "未执行任何工具。"
+    if summary:
+        history.append({"role": "assistant", "content": summary})
+
+    return history, summary, {}
 
 
 def _build_rule(rule_type: str, run_at: str, interval_minutes: float, daily_time: str) -> Dict:
@@ -1629,7 +1673,7 @@ def refresh_task_panels():
 
 # ==================== 设置面板 ====================
 
-def load_settings() -> Tuple[str, str, str, int, float, int, float, str, bool, str, str, str]:
+def load_settings() -> Tuple[str, str, str, int, float, int, float, str, bool, str, str, str, bool]:
     """加载设置"""
     s = app_state.settings
     return (
@@ -1645,6 +1689,7 @@ def load_settings() -> Tuple[str, str, str, int, float, int, float, str, bool, s
         s.assistant_api_base,
         s.assistant_api_key,
         s.assistant_model,
+        s.assistant_require_confirmation,
     )
 
 
@@ -1661,6 +1706,7 @@ def save_settings_form(
     assistant_api_base: str,
     assistant_api_key: str,
     assistant_model: str,
+    assistant_require_confirmation: bool,
 ) -> str:
     """保存设置"""
     app_state.settings.api_base_url = api_base_url
@@ -1675,6 +1721,7 @@ def save_settings_form(
     app_state.settings.assistant_api_base = assistant_api_base
     app_state.settings.assistant_api_key = assistant_api_key
     app_state.settings.assistant_model = assistant_model
+    app_state.settings.assistant_require_confirmation = assistant_require_confirmation
 
     app_state.refresh_assistant_planner()
     save_settings(app_state.settings)
@@ -2048,6 +2095,7 @@ def create_app() -> gr.Blocks:
                         )
                         with gr.Row():
                             send_assistant_btn = gr.Button("发送", variant="primary")
+                            confirm_assistant_plan_btn = gr.Button("✅ 确认计划并执行")
                             reset_assistant_btn = gr.Button("🆕 新会话")
 
                     with gr.Column(scale=1):
@@ -2077,7 +2125,7 @@ def create_app() -> gr.Blocks:
                         )
                         with gr.Row():
                             manual_execute_btn = gr.Button("⚡ 执行", variant="primary")
-                        plan_status = gr.Textbox(label="", interactive=False, lines=1, visible=False)
+                        plan_status = gr.Textbox(label="助手计划", interactive=False, lines=3, visible=True)
                         # 保留这些状态用于兼容
                         plan_state = gr.State({})
                         time_requirement = gr.State("")
@@ -2327,20 +2375,26 @@ def create_app() -> gr.Blocks:
             # AI 助手事件
             send_assistant_btn.click(
                 fn=assistant_chat,
-                inputs=[assistant_input, assistant_chatbot],
-                outputs=[assistant_chatbot, assistant_input],
+                inputs=[assistant_input, assistant_chatbot, plan_state],
+                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
             )
 
             # 支持回车发送
             assistant_input.submit(
                 fn=assistant_chat,
-                inputs=[assistant_input, assistant_chatbot],
-                outputs=[assistant_chatbot, assistant_input],
+                inputs=[assistant_input, assistant_chatbot, plan_state],
+                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
+            )
+
+            confirm_assistant_plan_btn.click(
+                fn=confirm_assistant_plan,
+                inputs=[plan_state, assistant_chatbot],
+                outputs=[assistant_chatbot, plan_status, plan_state],
             )
 
             reset_assistant_btn.click(
                 fn=reset_assistant_session,
-                outputs=[assistant_chatbot, plan_status],
+                outputs=[assistant_chatbot, plan_status, plan_state],
             ).then(
                 fn=render_task_status_for_assistant,
                 outputs=[task_status_display],
@@ -2452,6 +2506,10 @@ def create_app() -> gr.Blocks:
                             placeholder="gpt-4o-mini",
                             value=app_state.settings.assistant_model,
                         )
+                        assistant_require_confirmation = gr.Checkbox(
+                            label="工具执行前需要确认",
+                            value=app_state.settings.assistant_require_confirmation,
+                        )
                         with gr.Row():
                             max_tokens = gr.Number(
                                 label="最大Token数",
@@ -2509,7 +2567,7 @@ def create_app() -> gr.Blocks:
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
                         max_steps, action_delay, language, verbose,
-                        assistant_api_base, assistant_api_key, assistant_model,
+                        assistant_api_base, assistant_api_key, assistant_model, assistant_require_confirmation,
                     ],
                     outputs=[settings_status],
                 )
@@ -2530,6 +2588,7 @@ def create_app() -> gr.Blocks:
                         s.assistant_api_base,
                         s.assistant_api_key,
                         s.assistant_model,
+                        s.assistant_require_confirmation,
                     )
 
                 app.load(
@@ -2538,7 +2597,7 @@ def create_app() -> gr.Blocks:
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
                         max_steps, action_delay, language, verbose,
-                        assistant_api_base, assistant_api_key, assistant_model,
+                        assistant_api_base, assistant_api_key, assistant_model, assistant_require_confirmation,
                     ],
                 )
 

@@ -43,6 +43,7 @@ class Settings:
     assistant_api_base: str = "https://openrouter.ai/api/v1"
     assistant_api_key: str = ""
     assistant_model: str = "gpt-4o-mini"
+    assistant_require_confirmation: bool = True
 
     # 设备配置
     device_id: Optional[str] = None
