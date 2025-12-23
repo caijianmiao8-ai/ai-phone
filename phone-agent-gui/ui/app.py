@@ -3,7 +3,6 @@ Gradio UI 主界面
 Phone Agent GUI 的主要用户界面
 """
 import gradio as gr
-import inspect
 import threading
 import time
 import io
@@ -25,19 +24,6 @@ from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper, TaskResult
 from core.assistant_planner import AssistantPlanner, StructuredPlan
 from core.scheduler import SchedulerManager, JobSpec
-
-
-# ==================== Gradio 版本兼容性检测 ====================
-def _check_chatbot_type_param() -> bool:
-    """检测 Chatbot 是否支持 type 参数"""
-    try:
-        sig = inspect.signature(gr.Chatbot.__init__)
-        return 'type' in sig.parameters
-    except Exception:
-        return False
-
-
-CHATBOT_SUPPORTS_TYPE = _check_chatbot_type_param()
 
 
 # 配置 Gradio 缓存目录
@@ -1105,10 +1091,12 @@ def assistant_chat(user_msg: str, chat_history: List[Any]):
 
     reply = app_state.assistant_planner.chat(user_msg)
 
-    # 始终使用 tuple 格式 (user_msg, reply)
-    # 如果 Chatbot 支持 type 参数，我们会设置 type="tuples"
-    # 如果不支持，旧版 Gradio 默认就是 tuple 格式
-    history = (chat_history or []) + [(user_msg, reply)]
+    # 使用 messages 格式（Gradio 4.44+ 默认格式）
+    new_messages = [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": reply},
+    ]
+    history = (chat_history or []) + new_messages
     return history, ""  # 返回空字符串清空输入框
 
 
@@ -1682,11 +1670,11 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 💬 智能任务规划助手")
                         gr.Markdown("告诉我你想让手机自动完成什么任务，我会帮你规划并执行。")
-                        # 创建 Chatbot，强制使用 tuples 格式（如果支持 type 参数）
-                        chatbot_kwargs = {"height": 420, "label": "对话记录"}
-                        if CHATBOT_SUPPORTS_TYPE:
-                            chatbot_kwargs["type"] = "tuples"
-                        assistant_chatbot = gr.Chatbot(**chatbot_kwargs)
+                        # 创建 Chatbot，使用默认的 messages 格式
+                        assistant_chatbot = gr.Chatbot(
+                            height=420,
+                            label="对话记录",
+                        )
                         assistant_input = gr.Textbox(
                             label="",
                             placeholder="输入你的需求，按回车发送...",
