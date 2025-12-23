@@ -9,18 +9,21 @@ import io
 import os
 import shutil
 import tempfile
+from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass, field
 from PIL import Image
 from typing import Optional, List, Tuple, Generator, Dict
 
 from config.settings import Settings, get_settings, save_settings
-from knowledge_base.manager import KnowledgeManager, KnowledgeItem
+from knowledge_base.manager import KnowledgeManager
 from core.device_manager import DeviceManager, DeviceInfo
 from core.device_registry import DeviceRegistry
 from core.file_transfer import FileTransferManager, FileInfo, FileType
 from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper, TaskResult
+from core.assistant_planner import AssistantPlanner, StructuredPlan
+from core.scheduler import SchedulerManager, JobSpec
 
 
 # 配置 Gradio 缓存目录
@@ -83,6 +86,14 @@ class AppState:
         self.device_states: Dict[str, DeviceTaskState] = defaultdict(DeviceTaskState)
         self.state_lock = threading.Lock()
         self.task_queue: List[dict] = []
+        # AI 助手与调度
+        self.assistant_planner = AssistantPlanner(
+            api_base=self.settings.assistant_api_base,
+            api_key=self.settings.assistant_api_key,
+            model=self.settings.assistant_model,
+        )
+        self.scheduler: Optional[SchedulerManager] = None
+        self.latest_plan: Optional[StructuredPlan] = None
 
     def add_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -117,6 +128,14 @@ class AppState:
         with self.state_lock:
             state = self.device_states[device_id]
             state.agent = agent
+
+    def refresh_assistant_planner(self):
+        """同步助手配置"""
+        self.assistant_planner.update_config(
+            api_base=self.settings.assistant_api_base,
+            api_key=self.settings.assistant_api_key,
+            model=self.settings.assistant_model,
+        )
 
     def get_device_logs(self, device_id: str) -> str:
         with self.state_lock:
@@ -182,6 +201,8 @@ def scan_devices():
     return (
         result_text.strip(),
         gr.update(choices=choices, value=selected),
+        gr.update(choices=multi_device_choices, value=[]),
+        gr.update(choices=multi_device_choices, value=multi_selected),
         gr.update(choices=multi_device_choices, value=[]),
         gr.update(choices=multi_device_choices, value=multi_selected),
     )
@@ -1035,6 +1056,197 @@ def get_task_status() -> str:
     return "⏸️ 空闲"
 
 
+# ==================== AI 助手与调度 ====================
+
+def _ensure_scheduler() -> SchedulerManager:
+    if app_state.scheduler:
+        return app_state.scheduler
+
+    def _task_executor(job: JobSpec):
+        success, message, target_devices = prepare_task_queue(
+            job.description, job.use_knowledge, job.device_ids
+        )
+        if not success:
+            return False, message
+        start_ok, start_message, _ = start_task_execution(parallel=job.parallel)
+        if not start_ok:
+            return False, start_message
+        return True, start_message or "任务已启动"
+
+    app_state.scheduler = SchedulerManager(task_executor=_task_executor)
+    return app_state.scheduler
+
+
+def reset_assistant_session():
+    """重置助手会话"""
+    app_state.assistant_planner.start_session()
+    app_state.latest_plan = None
+    return [], "✅ 新会话已开始"
+
+
+def assistant_chat(user_msg: str, chat_history: List[Tuple[str, str]]):
+    """助手对话"""
+    reply = app_state.assistant_planner.chat(user_msg)
+    history = (chat_history or []) + [(user_msg, reply)]
+    return history
+
+
+def _format_structured_plan(plan: StructuredPlan) -> str:
+    rows = [
+        "| 字段 | 内容 |",
+        "| --- | --- |",
+        f"| 任务描述 | {plan.task_description} |",
+        f"| 目标设备 | {', '.join(plan.target_devices) if plan.target_devices else '未指定'} |",
+        f"| 时间要求 | {plan.time_requirement or '未指定'} |",
+        f"| 频率 | {plan.frequency or '一次性'} |",
+    ]
+    return "\n".join(rows)
+
+
+def generate_structured_plan(devices: List[str], time_requirement: str):
+    """生成结构化计划"""
+    plan = app_state.assistant_planner.summarize_plan(devices, time_requirement)
+    app_state.latest_plan = plan
+    return _format_structured_plan(plan), plan.to_dict()
+
+
+def _build_rule(rule_type: str, run_at: str, interval_minutes: float, daily_time: str) -> Dict:
+    rule_type = (rule_type or "").lower()
+    if rule_type == "once":
+        return {"type": "once", "run_at": run_at or datetime.now().isoformat()}
+    if rule_type == "daily":
+        return {"type": "daily", "time": daily_time or "09:00"}
+    # default interval
+    minutes = interval_minutes or 0
+    return {"type": "interval", "minutes": minutes if minutes > 0 else 60}
+
+
+def _describe_rule(rule: Dict[str, str]) -> str:
+    rtype = (rule.get("type") or "").lower()
+    if rtype == "once":
+        return f"一次性@{rule.get('run_at', '-')}"
+    if rtype == "daily":
+        return f"每日@{rule.get('time', '09:00')}"
+    if rtype == "interval":
+        minutes = rule.get("minutes")
+        seconds = rule.get("seconds")
+        val = minutes if minutes else (seconds / 60 if seconds else 60)
+        return f"间隔 {val} 分钟"
+    return "未设置"
+
+
+def _render_jobs_markdown() -> str:
+    scheduler = _ensure_scheduler()
+    jobs = scheduler.list_jobs()
+    if not jobs:
+        return "暂无定时任务"
+
+    header = "| ID | 描述 | 设备 | 规则 | 启用 | 下次执行 | 最近状态 |\n| --- | --- | --- | --- | --- | --- | --- |"
+    rows = []
+    for job in jobs:
+        rows.append(
+            f"| {job.id} | {job.description} | {', '.join(job.device_ids) or '-'} | "
+            f"{_describe_rule(job.rule)} | {'✅' if job.enabled else '⏸️'} | "
+            f"{job.next_run or '-'} | {job.last_status or '-'} |"
+        )
+    return "\n".join([header] + rows)
+
+
+def add_scheduled_job(
+    description: str,
+    device_ids: List[str],
+    use_kb: bool,
+    rule_type: str,
+    run_at: str,
+    interval_minutes: float,
+    daily_time: str,
+    parallel: bool = True,
+):
+    scheduler = _ensure_scheduler()
+    rule = _build_rule(rule_type, run_at, interval_minutes, daily_time)
+    job = scheduler.add_job(
+        {
+            "description": description or "未命名任务",
+            "device_ids": device_ids or [],
+            "use_knowledge": use_kb,
+            "rule": rule,
+            "parallel": parallel,
+        }
+    )
+    return f"✅ 已创建任务 {job.id}", _render_jobs_markdown()
+
+
+def remove_scheduled_job(job_id: str):
+    scheduler = _ensure_scheduler()
+    if not job_id:
+        return "请输入要删除的任务ID", _render_jobs_markdown()
+    ok = scheduler.remove_job(job_id)
+    status = "✅ 已删除" if ok else "未找到任务"
+    return status, _render_jobs_markdown()
+
+
+def toggle_scheduled_job(job_id: str, enabled: bool):
+    scheduler = _ensure_scheduler()
+    if not job_id:
+        return "请输入任务ID", _render_jobs_markdown()
+    ok = scheduler.toggle_job(job_id, enabled)
+    status = "✅ 已更新" if ok else "未找到任务"
+    return status, _render_jobs_markdown()
+
+
+def refresh_scheduled_jobs():
+    return _render_jobs_markdown()
+
+
+def enable_scheduled_job(job_id: str):
+    return toggle_scheduled_job(job_id, True)
+
+
+def disable_scheduled_job(job_id: str):
+    return toggle_scheduled_job(job_id, False)
+
+
+def execute_plan_now(plan_data: Dict, use_knowledge: bool, parallel: bool):
+    plan = plan_data or (app_state.latest_plan.to_dict() if app_state.latest_plan else {})
+    task_desc = plan.get("task_description") or plan.get("description") or ""
+    device_ids = plan.get("target_devices") or []
+    if not task_desc:
+        return "请先生成计划"
+    success, message, targets = prepare_task_queue(task_desc, use_knowledge, device_ids)
+    if not success:
+        return message
+    start_ok, start_message, _ = start_task_execution(parallel=parallel)
+    if not start_ok:
+        return start_message
+    return start_message or "任务已启动"
+
+
+def import_plan_to_scheduler(
+    plan_data: Dict,
+    rule_type: str,
+    run_at: str,
+    interval_minutes: float,
+    daily_time: str,
+    use_knowledge: bool,
+    parallel: bool,
+):
+    plan = plan_data or (app_state.latest_plan.to_dict() if app_state.latest_plan else {})
+    if not plan:
+        return "请先生成计划", _render_jobs_markdown()
+    description = plan.get("task_description") or "未命名任务"
+    device_ids = plan.get("target_devices") or []
+    return add_scheduled_job(
+        description=description,
+        device_ids=device_ids,
+        use_kb=use_knowledge,
+        rule_type=rule_type,
+        run_at=run_at,
+        interval_minutes=interval_minutes,
+        daily_time=daily_time,
+        parallel=parallel,
+    )
+
+
 def refresh_task_panels():
     """同时刷新日志和状态面板"""
     return _render_device_logs(), _render_device_status_board()
@@ -1042,7 +1254,7 @@ def refresh_task_panels():
 
 # ==================== 设置面板 ====================
 
-def load_settings() -> Tuple[str, str, str, int, float, int, float, str, bool]:
+def load_settings() -> Tuple[str, str, str, int, float, int, float, str, bool, str, str, str]:
     """加载设置"""
     s = app_state.settings
     return (
@@ -1055,6 +1267,9 @@ def load_settings() -> Tuple[str, str, str, int, float, int, float, str, bool]:
         s.action_delay,
         s.language,
         s.verbose,
+        s.assistant_api_base,
+        s.assistant_api_key,
+        s.assistant_model,
     )
 
 
@@ -1068,6 +1283,9 @@ def save_settings_form(
     action_delay: float,
     language: str,
     verbose: bool,
+    assistant_api_base: str,
+    assistant_api_key: str,
+    assistant_model: str,
 ) -> str:
     """保存设置"""
     app_state.settings.api_base_url = api_base_url
@@ -1079,7 +1297,11 @@ def save_settings_form(
     app_state.settings.action_delay = action_delay
     app_state.settings.language = language
     app_state.settings.verbose = verbose
+    app_state.settings.assistant_api_base = assistant_api_base
+    app_state.settings.assistant_api_key = assistant_api_key
+    app_state.settings.assistant_model = assistant_model
 
+    app_state.refresh_assistant_planner()
     save_settings(app_state.settings)
     return "设置已保存"
 
@@ -1433,11 +1655,118 @@ def create_app() -> gr.Blocks:
                     outputs=[task_screenshot],
                 )
 
+            # ============ AI 助手 Tab ============
+            with gr.Tab("🤖 AI助手"):
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 对话助手")
+                        gr.Markdown("支持任意语言，助手会使用你输入的语言进行回复。")
+                        assistant_chatbot = gr.Chatbot(height=420, label="对话记录")
+                        assistant_input = gr.Textbox(
+                            label="输入需求",
+                            placeholder="描述你的任务或需求...",
+                        )
+                        with gr.Row():
+                            send_assistant_btn = gr.Button("发送", variant="primary")
+                            reset_assistant_btn = gr.Button("🆕 新会话")
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 计划生成")
+                        assistant_device_selector = gr.CheckboxGroup(
+                            label="目标设备",
+                            choices=[],
+                            info="不选择则默认在线设备",
+                        )
+                        time_requirement = gr.Textbox(
+                            label="时间要求/频率",
+                            placeholder="例如：每2小时、每天9点、今晚19:00执行一次",
+                        )
+                        assistant_use_kb = gr.Checkbox(label="启用知识库", value=True)
+                        assistant_parallel = gr.Checkbox(label="并行执行", value=True)
+                        with gr.Row():
+                            plan_rule_type = gr.Dropdown(
+                                label="调度规则",
+                                choices=["once", "interval", "daily"],
+                                value="once",
+                            )
+                            plan_once_time = gr.Textbox(
+                                label="一次性时间",
+                                placeholder="2024-01-01T09:00:00",
+                            )
+                        with gr.Row():
+                            plan_interval_minutes = gr.Number(
+                                label="间隔(分钟)",
+                                value=60,
+                            )
+                            plan_daily_time = gr.Textbox(
+                                label="每日时间(HH:MM)",
+                                value="09:00",
+                            )
+                        generate_plan_btn = gr.Button("📝 生成计划清单", variant="primary")
+                        plan_preview = gr.Markdown("尚未生成计划")
+                        plan_state = gr.State({})
+                        with gr.Row():
+                            import_plan_btn = gr.Button("📥 导入到调度")
+                            execute_plan_btn = gr.Button("⚡ 立即执行", variant="primary")
+                        plan_status = gr.Textbox(label="操作状态", interactive=False)
+
+            # ============ 定时任务 Tab ============
+            with gr.Tab("⏰ 定时任务"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 创建/编辑任务")
+                        schedule_desc = gr.Textbox(
+                            label="任务描述",
+                            placeholder="例如：每天早上检查新邮件",
+                        )
+                        schedule_device_selector = gr.CheckboxGroup(
+                            label="目标设备",
+                            choices=[],
+                            info="不选择则默认在线设备",
+                        )
+                        schedule_use_kb = gr.Checkbox(label="启用知识库", value=True)
+                        schedule_parallel = gr.Checkbox(label="并行执行", value=True)
+                        schedule_rule_type = gr.Dropdown(
+                            label="调度类型",
+                            choices=["once", "interval", "daily"],
+                            value="interval",
+                        )
+                        schedule_once_time = gr.Textbox(
+                            label="一次性时间",
+                            placeholder="2024-01-01T10:00:00",
+                        )
+                        schedule_interval_minutes = gr.Number(
+                            label="间隔(分钟)",
+                            value=120,
+                        )
+                        schedule_daily_time = gr.Textbox(
+                            label="每日时间(HH:MM)",
+                            value="09:00",
+                        )
+                        add_job_btn = gr.Button("➕ 新建/保存", variant="primary")
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 任务列表")
+                        scheduler_table = gr.Markdown("暂无定时任务")
+                        scheduler_status = gr.Textbox(label="状态", interactive=False)
+                        with gr.Row():
+                            remove_job_id = gr.Textbox(label="任务ID", placeholder="粘贴ID操作")
+                        with gr.Row():
+                            enable_job_btn = gr.Button("启用")
+                            disable_job_btn = gr.Button("禁用")
+                            delete_job_btn = gr.Button("删除", variant="stop")
+                            refresh_job_btn = gr.Button("刷新列表")
+
             # ========== 设备管理事件绑定 ==========
             # 设备扫描
             scan_btn.click(
                 fn=scan_devices,
-                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+                outputs=[
+                    device_list,
+                    device_dropdown,
+                    multi_device_selector,
+                    task_device_selector,
+                    assistant_device_selector,
+                    schedule_device_selector,
+                ],
             )
 
             # 选择设备时自动加载信息和刷新屏幕
@@ -1454,7 +1783,14 @@ def create_app() -> gr.Blocks:
                 outputs=[wifi_status],
             ).then(
                 fn=scan_devices,
-                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+                outputs=[
+                    device_list,
+                    device_dropdown,
+                    multi_device_selector,
+                    task_device_selector,
+                    assistant_device_selector,
+                    schedule_device_selector,
+                ],
             )
 
             disconnect_btn.click(
@@ -1462,7 +1798,14 @@ def create_app() -> gr.Blocks:
                 outputs=[wifi_status],
             ).then(
                 fn=scan_devices,
-                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+                outputs=[
+                    device_list,
+                    device_dropdown,
+                    multi_device_selector,
+                    task_device_selector,
+                    assistant_device_selector,
+                    schedule_device_selector,
+                ],
             )
 
             # 设备设置保存和删除
@@ -1472,7 +1815,14 @@ def create_app() -> gr.Blocks:
                 outputs=[device_edit_status],
             ).then(
                 fn=scan_devices,
-                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+                outputs=[
+                    device_list,
+                    device_dropdown,
+                    multi_device_selector,
+                    task_device_selector,
+                    assistant_device_selector,
+                    schedule_device_selector,
+                ],
             )
 
             delete_device_btn.click(
@@ -1480,7 +1830,14 @@ def create_app() -> gr.Blocks:
                 outputs=[device_edit_status],
             ).then(
                 fn=scan_devices,
-                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+                outputs=[
+                    device_list,
+                    device_dropdown,
+                    multi_device_selector,
+                    task_device_selector,
+                    assistant_device_selector,
+                    schedule_device_selector,
+                ],
             )
 
             # 屏幕操作
@@ -1594,10 +1951,97 @@ def create_app() -> gr.Blocks:
                 outputs=[cmd_output],
             )
 
+            # AI 助手事件
+            send_assistant_btn.click(
+                fn=assistant_chat,
+                inputs=[assistant_input, assistant_chatbot],
+                outputs=[assistant_chatbot],
+            )
+
+            reset_assistant_btn.click(
+                fn=reset_assistant_session,
+                outputs=[assistant_chatbot, plan_status],
+            ).then(
+                fn=lambda: ("尚未生成计划", {}),
+                outputs=[plan_preview, plan_state],
+            )
+
+            generate_plan_btn.click(
+                fn=generate_structured_plan,
+                inputs=[assistant_device_selector, time_requirement],
+                outputs=[plan_preview, plan_state],
+            )
+
+            execute_plan_btn.click(
+                fn=execute_plan_now,
+                inputs=[plan_state, assistant_use_kb, assistant_parallel],
+                outputs=[plan_status],
+            )
+
+            import_plan_btn.click(
+                fn=import_plan_to_scheduler,
+                inputs=[
+                    plan_state,
+                    plan_rule_type,
+                    plan_once_time,
+                    plan_interval_minutes,
+                    plan_daily_time,
+                    assistant_use_kb,
+                    assistant_parallel,
+                ],
+                outputs=[plan_status, scheduler_table],
+            )
+
+            # 定时任务事件
+            add_job_btn.click(
+                fn=add_scheduled_job,
+                inputs=[
+                    schedule_desc,
+                    schedule_device_selector,
+                    schedule_use_kb,
+                    schedule_rule_type,
+                    schedule_once_time,
+                    schedule_interval_minutes,
+                    schedule_daily_time,
+                    schedule_parallel,
+                ],
+                outputs=[scheduler_status, scheduler_table],
+            )
+
+            delete_job_btn.click(
+                fn=remove_scheduled_job,
+                inputs=[remove_job_id],
+                outputs=[scheduler_status, scheduler_table],
+            )
+
+            enable_job_btn.click(
+                fn=enable_scheduled_job,
+                inputs=[remove_job_id],
+                outputs=[scheduler_status, scheduler_table],
+            )
+
+            disable_job_btn.click(
+                fn=disable_scheduled_job,
+                inputs=[remove_job_id],
+                outputs=[scheduler_status, scheduler_table],
+            )
+
+            refresh_job_btn.click(
+                fn=refresh_scheduled_jobs,
+                outputs=[scheduler_table],
+            )
+
             # 初始加载设备列表
             app.load(
                 fn=scan_devices,
-                outputs=[device_list, device_dropdown, multi_device_selector, task_device_selector],
+                outputs=[
+                    device_list,
+                    device_dropdown,
+                    multi_device_selector,
+                    task_device_selector,
+                    assistant_device_selector,
+                    schedule_device_selector,
+                ],
             )
 
             # ============ 设置 Tab ============
@@ -1620,6 +2064,23 @@ def create_app() -> gr.Blocks:
                             label="模型名称",
                             placeholder="autoglm-phone",
                             value=app_state.settings.model_name,
+                        )
+                        gr.Markdown("### AI助手配置")
+                        assistant_api_base = gr.Textbox(
+                            label="助手 API Base",
+                            placeholder="https://openrouter.ai/api/v1",
+                            value=app_state.settings.assistant_api_base,
+                        )
+                        assistant_api_key = gr.Textbox(
+                            label="助手 API Key",
+                            type="password",
+                            placeholder="openrouter-xxxxx",
+                            value=app_state.settings.assistant_api_key,
+                        )
+                        assistant_model = gr.Textbox(
+                            label="助手模型",
+                            placeholder="gpt-4o-mini",
+                            value=app_state.settings.assistant_model,
                         )
                         with gr.Row():
                             max_tokens = gr.Number(
@@ -1678,6 +2139,7 @@ def create_app() -> gr.Blocks:
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
                         max_steps, action_delay, language, verbose,
+                        assistant_api_base, assistant_api_key, assistant_model,
                     ],
                     outputs=[settings_status],
                 )
@@ -1695,6 +2157,9 @@ def create_app() -> gr.Blocks:
                         s.action_delay,
                         s.language,
                         s.verbose,
+                        s.assistant_api_base,
+                        s.assistant_api_key,
+                        s.assistant_model,
                     )
 
                 app.load(
@@ -1703,6 +2168,7 @@ def create_app() -> gr.Blocks:
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
                         max_steps, action_delay, language, verbose,
+                        assistant_api_base, assistant_api_key, assistant_model,
                     ],
                 )
 
@@ -1710,6 +2176,12 @@ def create_app() -> gr.Blocks:
                     fn=check_adb_status,
                     outputs=[adb_status],
                 )
+
+            # 初始加载定时任务
+            app.load(
+                fn=refresh_scheduled_jobs,
+                outputs=[scheduler_table],
+            )
 
         gr.Markdown(
             """

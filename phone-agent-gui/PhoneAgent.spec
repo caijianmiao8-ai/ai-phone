@@ -65,6 +65,17 @@ for pkg in packages_to_collect:
     except Exception as e:
         print(f"Warning: Could not collect {pkg}: {e}")
 
+# 额外拷贝 Gradio 前端模板（避免丢失静态资源导致打包失败）
+try:
+    import gradio as _gradio
+
+    gradio_base = os.path.dirname(_gradio.__file__)
+    template_dir = os.path.join(gradio_base, "templates")
+    if os.path.exists(template_dir):
+        datas.append((template_dir, "gradio/templates"))
+except Exception as e:
+    print(f"Warning: Could not append gradio templates: {e}")
+
 # 额外的隐藏导入
 hiddenimports += [
     'PIL',
