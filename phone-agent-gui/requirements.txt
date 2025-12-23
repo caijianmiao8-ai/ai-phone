@@ -1,7 +1,7 @@
 # Phone Agent GUI 依赖
 
 # UI框架
-gradio>=4.44.0
+gradio>=4.0.0
 
 # 图像处理
 Pillow>=10.0.0

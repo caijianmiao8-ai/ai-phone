@@ -1084,16 +1084,14 @@ def reset_assistant_session():
     return [], "✅ 新会话已开始"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Dict[str, str]]):
+def assistant_chat(user_msg: str, chat_history: List[Tuple[str, str]]):
     """助手对话，返回 (更新后的历史, 清空的输入框)"""
     if not user_msg or not user_msg.strip():
         return chat_history or [], ""
 
     reply = app_state.assistant_planner.chat(user_msg)
-    history = (chat_history or []) + [
-        {"role": "user", "content": user_msg},
-        {"role": "assistant", "content": reply},
-    ]
+    # 使用 tuple 格式 (user_msg, assistant_reply) 兼容所有 Gradio 4.x 版本
+    history = (chat_history or []) + [(user_msg, reply)]
     return history, ""  # 返回空字符串清空输入框
 
 
@@ -1670,8 +1668,6 @@ def create_app() -> gr.Blocks:
                         assistant_chatbot = gr.Chatbot(
                             height=420,
                             label="对话记录",
-                            type="messages",
-                            placeholder="👋 你好！我是任务规划助手，告诉我你想让手机自动完成什么任务吧！",
                         )
                         assistant_input = gr.Textbox(
                             label="",
