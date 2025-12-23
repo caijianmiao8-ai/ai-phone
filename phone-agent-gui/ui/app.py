@@ -1084,13 +1084,10 @@ def reset_assistant_session():
     return [], "✅ 新会话已开始"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Dict[str, str]]):
+def assistant_chat(user_msg: str, chat_history: List[Tuple[str, str]]):
     """助手对话"""
     reply = app_state.assistant_planner.chat(user_msg)
-    history = (chat_history or []) + [
-        {"role": "user", "content": user_msg},
-        {"role": "assistant", "content": reply},
-    ]
+    history = (chat_history or []) + [(user_msg, reply)]
     return history
 
 
@@ -1437,7 +1434,7 @@ def create_app() -> gr.Blocks:
                                 label="详细结果",
                                 interactive=False,
                                 row_count=(0, "dynamic"),
-                                col_count=(3, "fixed"),
+                                column_count=(3, "fixed"),
                             )
 
                     # ===== 右侧：屏幕操作 =====
@@ -1667,7 +1664,6 @@ def create_app() -> gr.Blocks:
                         assistant_chatbot = gr.Chatbot(
                             height=420,
                             label="对话记录",
-                            type="messages",
                         )
                         assistant_input = gr.Textbox(
                             label="输入需求",
