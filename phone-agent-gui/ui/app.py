@@ -106,71 +106,52 @@ class AppState:
         self.assistant_planner.register_tool_handler("schedule_task", self._tool_schedule_task)
         self.assistant_planner.register_tool_handler("get_task_status", self._tool_get_task_status)
 
-    def _tool_execute_task(self, task_description: str, device_id: str = None) -> dict:
-        """工具：立即执行任务"""
+    def _tool_execute_task(
+        self,
+        task_description: str,
+        device_id: str = None,
+        device_ids: List[str] = None,
+        use_knowledge: bool = None,
+    ) -> dict:
+        """工具：立即执行任务（支持多设备）"""
         if self.is_task_running:
             return {"success": False, "message": "已有任务在执行中，请等待完成"}
 
-        # 确定目标设备
-        target_device = device_id
-        if not target_device:
-            # 使用当前选中的设备或第一个在线设备
-            devices = self.device_manager.scan_devices(include_saved_offline=False)
-            online_devices = [d for d in devices if d.is_online]
-            if online_devices:
-                target_device = online_devices[0].device_id
-            else:
-                return {"success": False, "message": "没有可用的在线设备"}
+        target_list = [d for d in (device_ids or []) if d]
+        if device_id and not target_list:
+            target_list = [device_id]
 
-        # 启动任务（在后台执行）
-        self.task_queue = [{
-            "task": task_description,
-            "device_id": target_device,
-            "use_knowledge": self.settings.knowledge_base_enabled,
-        }]
+        use_kb = self.settings.knowledge_base_enabled if use_knowledge is None else use_knowledge
+        success, warning, available_devices = prepare_task_queue(
+            task_description.strip(),
+            use_kb,
+            target_list,
+            force_refresh_devices=True,
+        )
+        if not success:
+            return {
+                "success": False,
+                "message": warning or "任务准备失败",
+                "device_ids": available_devices or target_list,
+            }
 
-        # 启动异步执行
-        def run_async():
-            try:
-                self.is_task_running = True
-                self.reset_device_state(target_device)
-                self.set_device_status(target_device, "🔄 执行中")
-                self.add_device_log(target_device, f"开始执行: {task_description}")
+        start_ok, start_message, _ = start_task_execution(parallel=True)
+        if not start_ok:
+            return {
+                "success": False,
+                "message": start_message or "任务启动失败",
+                "device_ids": available_devices,
+            }
 
-                agent = AgentWrapper(
-                    api_base_url=self.settings.api_base_url,
-                    api_key=self.settings.api_key,
-                    model_name=self.settings.model_name,
-                    device_id=target_device,
-                    device_type=self.settings.device_type,
-                    knowledge_manager=self.knowledge_manager if self.settings.knowledge_base_enabled else None,
-                    language=self.settings.language,
-                    max_steps=self.settings.max_steps,
-                )
-                self.set_device_agent(target_device, agent)
-
-                for step_result in agent.run_task(task_description):
-                    self.add_device_log(target_device, step_result.message)
-                    if step_result.screenshot:
-                        self.set_device_screenshot(target_device, step_result.screenshot)
-
-                self.set_device_status(target_device, "✅ 完成")
-                self.add_device_log(target_device, "任务执行完成")
-            except Exception as e:
-                self.set_device_status(target_device, f"❌ 失败: {str(e)}")
-                self.add_device_log(target_device, f"执行失败: {str(e)}")
-            finally:
-                self.is_task_running = False
-                self.set_device_agent(target_device, None)
-
-        thread = threading.Thread(target=run_async, daemon=True)
-        thread.start()
+        status = start_message or "任务已启动"
+        if warning and warning != start_message:
+            status = f"{status} ({warning})"
 
         return {
             "success": True,
-            "message": f"任务已开始在设备 {target_device} 上执行",
-            "device_id": target_device,
-            "task": task_description
+            "message": f"{status} | 目标设备: {', '.join(available_devices)}",
+            "device_ids": available_devices,
+            "task": task_description,
         }
 
     def _tool_list_devices(self) -> dict:
@@ -286,25 +267,14 @@ class AppState:
         if not spec.device_ids:
             return False, "没有指定设备"
 
-        success_count = 0
-        fail_count = 0
-        messages = []
-
-        for device_id in spec.device_ids:
-            result = self._tool_execute_task(spec.description, device_id)
-            if result.get("success"):
-                success_count += 1
-                messages.append(f"{device_id}: 已启动")
-            else:
-                fail_count += 1
-                messages.append(f"{device_id}: {result.get('message', '失败')}")
-
-        if fail_count == 0:
-            return True, f"在 {success_count} 个设备上启动成功"
-        elif success_count == 0:
-            return False, f"全部失败: {'; '.join(messages)}"
-        else:
-            return True, f"部分成功 ({success_count}/{success_count + fail_count})"
+        result = self._tool_execute_task(
+            task_description=spec.description,
+            device_ids=spec.device_ids,
+            use_knowledge=spec.use_knowledge,
+        )
+        if result.get("success"):
+            return True, result.get("message", "定时任务已触发执行")
+        return False, result.get("message", "执行失败")
 
     def add_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -1334,7 +1304,7 @@ def _ensure_scheduler() -> SchedulerManager:
     return app_state.scheduler
 
 
-def _build_device_context_message() -> str:
+def _build_device_context_message(selected_devices: Optional[List[str]] = None) -> str:
     """构造设备上下文，传递给助手提示可用设备"""
     devices = _ensure_cached_devices(force_refresh=True)
     if not devices:
@@ -1361,12 +1331,26 @@ def _build_device_context_message() -> str:
     online_text = "、".join(online_list) if online_list else "无"
     offline_text = "、".join(offline_list) if offline_list else "无"
 
+    selected_text = ""
+    if selected_devices:
+        selected_valid = [d for d in selected_devices if any(dev.device_id == d for dev in devices)]
+        selected_invalid = [d for d in selected_devices if d not in selected_valid]
+        selected_chunks = []
+        if selected_valid:
+            selected_chunks.append(f"用户已在界面选择: {', '.join(selected_valid)}（计划/确认时展示全部目标设备）")
+        if selected_invalid:
+            selected_chunks.append(f"未在设备列表中找到: {', '.join(selected_invalid)}")
+        if selected_chunks:
+            selected_text = "\n" + "；".join(selected_chunks)
+
     return (
         "【设备状态】\n"
         f"在线设备: {online_text}\n"
         f"离线设备: {offline_text}\n"
         "【重要】调用 execute_task 时，device_id 参数必须使用上面的 device_id= 后面的值（如 192.168.1.1:5555），"
-        "不要使用显示名称（如「shenlong」）。"
+        "不要使用显示名称（如「shenlong」）。\n"
+        "支持在 execute_task 中返回多个 device_id 组成的 device_ids 数组（兼容单个 device_id 字段）。"
+        f"{selected_text}"
     )
 
 
@@ -1416,9 +1400,12 @@ def manual_execute_task(task_desc: str, device_ids: List[str], use_kb: bool):
     if app_state.is_task_running:
         return "已有任务在执行中，请等待完成"
 
-    # 使用第一个选中的设备，或自动选择
-    target_device = device_ids[0] if device_ids else None
-    result = app_state._tool_execute_task(task_desc.strip(), target_device)
+    targets = [d for d in device_ids if d]
+    result = app_state._tool_execute_task(
+        task_description=task_desc.strip(),
+        device_ids=targets,
+        use_knowledge=use_kb,
+    )
 
     if result.get("success"):
         return f"✅ {result.get('message', '任务已启动')}"
@@ -1426,13 +1413,13 @@ def manual_execute_task(task_desc: str, device_ids: List[str], use_kb: bool):
         return f"❌ {result.get('message', '执行失败')}"
 
 
-def assistant_chat(user_msg: str, chat_history: List[Any], plan_state: Dict[str, Any]):
-    """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框, 计划状态, 状态文本)]"""
+def assistant_chat(user_msg: str, chat_history: List[Any], selected_devices: List[str]):
+    """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框)]"""
     if not user_msg or not user_msg.strip():
         yield chat_history or [], "", plan_state or {}, ""
         return
 
-    device_context = _build_device_context_message()
+    device_context = _build_device_context_message(selected_devices)
     history = list(chat_history or [])
 
     # 添加用户消息
@@ -1494,7 +1481,7 @@ def _format_structured_plan(plan: StructuredPlan) -> str:
 
 def generate_structured_plan(devices: List[str], time_requirement: str):
     """生成结构化计划"""
-    device_context = _build_device_context_message()
+    device_context = _build_device_context_message(devices)
     preferred_devices = devices or [d.device_id for d in _ensure_cached_devices(force_refresh=True) if d.is_online]
     plan = app_state.assistant_planner.summarize_plan(
         preferred_devices,
@@ -2108,7 +2095,7 @@ def create_app() -> gr.Blocks:
                         assistant_device_selector = gr.CheckboxGroup(
                             label="",
                             choices=[],
-                            info="AI 会自动选择在线设备，也可手动指定",
+                            info="AI 会自动选择在线设备，也可手动指定（使用上方设备列表中的 device_id，可多选）",
                         )
 
                         with gr.Accordion("⚙️ 执行选项", open=False):
@@ -2375,21 +2362,15 @@ def create_app() -> gr.Blocks:
             # AI 助手事件
             send_assistant_btn.click(
                 fn=assistant_chat,
-                inputs=[assistant_input, assistant_chatbot, plan_state],
-                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
+                inputs=[assistant_input, assistant_chatbot, assistant_device_selector],
+                outputs=[assistant_chatbot, assistant_input],
             )
 
             # 支持回车发送
             assistant_input.submit(
                 fn=assistant_chat,
-                inputs=[assistant_input, assistant_chatbot, plan_state],
-                outputs=[assistant_chatbot, assistant_input, plan_state, plan_status],
-            )
-
-            confirm_assistant_plan_btn.click(
-                fn=confirm_assistant_plan,
-                inputs=[plan_state, assistant_chatbot],
-                outputs=[assistant_chatbot, plan_status, plan_state],
+                inputs=[assistant_input, assistant_chatbot, assistant_device_selector],
+                outputs=[assistant_chatbot, assistant_input],
             )
 
             reset_assistant_btn.click(

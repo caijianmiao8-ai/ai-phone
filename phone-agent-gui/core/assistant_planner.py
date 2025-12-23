@@ -87,9 +87,14 @@ AVAILABLE_TOOLS = [
                         "type": "string",
                         "description": "给执行AI的操作指令。必须是清晰的祈使句，包含所有具体信息。例如：'打开微信，搜索联系人张三，发送消息：你好'"
                     },
+                    "device_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "目标设备ID列表，支持同时在多个设备上执行。优先使用该字段。"
+                    },
                     "device_id": {
                         "type": "string",
-                        "description": "目标设备ID。如果用户未指定，使用当前选中的设备"
+                        "description": "目标设备ID（单个设备）。为兼容旧版本保留，未提供 device_ids 时使用"
                     }
                 },
                 "required": ["task_description"]
