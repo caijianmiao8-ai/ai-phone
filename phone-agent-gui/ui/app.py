@@ -22,7 +22,7 @@ from core.device_registry import DeviceRegistry
 from core.file_transfer import FileTransferManager, FileInfo, FileType
 from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper, TaskResult
-from core.assistant_planner import AssistantPlanner, StructuredPlan
+from core.assistant_planner import AssistantPlanner, StructuredPlan, ChatResponse, ToolCallStatus
 from core.scheduler import SchedulerManager, JobSpec
 
 
@@ -94,6 +94,199 @@ class AppState:
         )
         self.scheduler: Optional[SchedulerManager] = None
         self.latest_plan: Optional[StructuredPlan] = None
+        # 注册工具处理器
+        self._register_tool_handlers()
+
+    def _register_tool_handlers(self):
+        """注册 AI 助手可调用的工具处理器"""
+        self.assistant_planner.register_tool_handler("execute_task", self._tool_execute_task)
+        self.assistant_planner.register_tool_handler("list_devices", self._tool_list_devices)
+        self.assistant_planner.register_tool_handler("query_knowledge_base", self._tool_query_knowledge_base)
+        self.assistant_planner.register_tool_handler("schedule_task", self._tool_schedule_task)
+        self.assistant_planner.register_tool_handler("get_task_status", self._tool_get_task_status)
+
+    def _tool_execute_task(self, task_description: str, device_id: str = None) -> dict:
+        """工具：立即执行任务"""
+        if self.is_task_running:
+            return {"success": False, "message": "已有任务在执行中，请等待完成"}
+
+        # 确定目标设备
+        target_device = device_id
+        if not target_device:
+            # 使用当前选中的设备或第一个在线设备
+            devices = self.device_manager.scan_devices(include_saved_offline=False)
+            online_devices = [d for d in devices if d.is_online]
+            if online_devices:
+                target_device = online_devices[0].device_id
+            else:
+                return {"success": False, "message": "没有可用的在线设备"}
+
+        # 启动任务（在后台执行）
+        self.task_queue = [{
+            "task": task_description,
+            "device_id": target_device,
+            "use_knowledge": self.settings.knowledge_base_enabled,
+        }]
+
+        # 启动异步执行
+        def run_async():
+            try:
+                self.is_task_running = True
+                self.reset_device_state(target_device)
+                self.set_device_status(target_device, "🔄 执行中")
+                self.add_device_log(target_device, f"开始执行: {task_description}")
+
+                agent = AgentWrapper(
+                    api_base=self.settings.api_base_url,
+                    api_key=self.settings.api_key,
+                    model_name=self.settings.model_name,
+                    device_id=target_device,
+                    device_type=self.settings.device_type,
+                    knowledge_manager=self.knowledge_manager if self.settings.knowledge_base_enabled else None,
+                    adb_path=self.adb_helper.adb_path,
+                    language=self.settings.language,
+                    max_steps=self.settings.max_steps,
+                )
+                self.set_device_agent(target_device, agent)
+
+                for step_result in agent.run_task(task_description):
+                    self.add_device_log(target_device, step_result.message)
+                    if step_result.screenshot:
+                        self.set_device_screenshot(target_device, step_result.screenshot)
+
+                self.set_device_status(target_device, "✅ 完成")
+                self.add_device_log(target_device, "任务执行完成")
+            except Exception as e:
+                self.set_device_status(target_device, f"❌ 失败: {str(e)}")
+                self.add_device_log(target_device, f"执行失败: {str(e)}")
+            finally:
+                self.is_task_running = False
+                self.set_device_agent(target_device, None)
+
+        thread = threading.Thread(target=run_async, daemon=True)
+        thread.start()
+
+        return {
+            "success": True,
+            "message": f"任务已开始在设备 {target_device} 上执行",
+            "device_id": target_device,
+            "task": task_description
+        }
+
+    def _tool_list_devices(self) -> dict:
+        """工具：获取设备列表"""
+        devices = self.device_manager.scan_devices(include_saved_offline=True)
+        device_list = []
+        for d in devices:
+            device_list.append({
+                "device_id": d.device_id,
+                "name": d.name,
+                "is_online": d.is_online,
+                "connection_type": d.connection_type,
+            })
+        return {
+            "devices": device_list,
+            "count": len(device_list),
+            "online_count": sum(1 for d in devices if d.is_online)
+        }
+
+    def _tool_query_knowledge_base(self, query: str) -> dict:
+        """工具：查询知识库"""
+        if not self.settings.knowledge_base_enabled:
+            return {"success": False, "message": "知识库未启用"}
+
+        items = self.knowledge_manager.search(query)
+        if not items:
+            return {"success": True, "found": False, "message": f"未找到与 '{query}' 相关的知识"}
+
+        results = []
+        for item in items[:5]:  # 最多返回5条
+            results.append({
+                "title": item.title,
+                "content": item.content,
+                "keywords": item.keywords,
+            })
+        return {"success": True, "found": True, "results": results}
+
+    def _tool_schedule_task(
+        self,
+        task_description: str,
+        schedule_type: str,
+        schedule_value: str,
+        device_ids: List[str] = None
+    ) -> dict:
+        """工具：创建定时任务"""
+        from core.scheduler import SchedulerManager
+
+        if not self.scheduler:
+            self.scheduler = SchedulerManager(
+                lambda spec: self._run_scheduled_task(spec),
+                config_dir=os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "config"
+                )
+            )
+            self.scheduler.start()
+
+        # 构建调度规则
+        rule = {"type": schedule_type}
+        if schedule_type == "once":
+            rule["run_at"] = schedule_value
+        elif schedule_type == "interval":
+            rule["minutes"] = float(schedule_value)
+        elif schedule_type == "daily":
+            rule["time"] = schedule_value
+
+        # 确定设备
+        targets = device_ids or []
+        if not targets:
+            devices = self.device_manager.scan_devices(include_saved_offline=False)
+            targets = [d.device_id for d in devices if d.is_online]
+
+        job_id = self.scheduler.add_job(
+            description=task_description,
+            device_ids=targets,
+            rule=rule,
+        )
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "message": f"定时任务已创建，ID: {job_id}",
+            "schedule_type": schedule_type,
+            "schedule_value": schedule_value,
+        }
+
+    def _tool_get_task_status(self, device_id: str = None) -> dict:
+        """工具：获取任务状态"""
+        if device_id:
+            state = self.device_states.get(device_id)
+            if not state:
+                return {"device_id": device_id, "status": "无记录", "logs": []}
+            return {
+                "device_id": device_id,
+                "status": state.status,
+                "logs": state.logs[-10:],  # 最近10条日志
+                "has_screenshot": state.screenshot is not None,
+            }
+        else:
+            # 返回所有设备状态
+            all_status = []
+            for dev_id, state in self.device_states.items():
+                all_status.append({
+                    "device_id": dev_id,
+                    "status": state.status,
+                    "log_count": len(state.logs),
+                })
+            return {
+                "is_running": self.is_task_running,
+                "devices": all_status,
+            }
+
+    def _run_scheduled_task(self, spec: JobSpec):
+        """执行定时任务的回调"""
+        for device_id in spec.device_ids:
+            self._tool_execute_task(spec.description, device_id)
 
     def add_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -1156,23 +1349,39 @@ def reset_assistant_session():
 
 
 def assistant_chat(user_msg: str, chat_history: List[Any]):
-    """助手对话，返回 (更新后的历史, 清空的输入框)"""
+    """助手对话（流式），返回 Generator[(更新后的历史, 清空的输入框)]"""
     if not user_msg or not user_msg.strip():
-        return chat_history or [], ""
+        yield chat_history or [], ""
+        return
 
     device_context = _build_device_context_message()
-    reply = app_state.assistant_planner.chat(
-        user_msg,
-        context_messages=[{"role": "system", "content": device_context}],
-    )
+    history = list(chat_history or [])
 
-    # 使用 messages 格式（Gradio 4.44+ 默认格式）
-    new_messages = [
-        {"role": "user", "content": user_msg},
-        {"role": "assistant", "content": reply},
-    ]
-    history = (chat_history or []) + new_messages
-    return history, ""  # 返回空字符串清空输入框
+    # 添加用户消息
+    history.append({"role": "user", "content": user_msg})
+
+    # 流式获取助手回复
+    assistant_content = ""
+    history.append({"role": "assistant", "content": ""})
+
+    try:
+        for chunk in app_state.assistant_planner.chat_stream(
+            user_msg,
+            context_messages=[{"role": "system", "content": device_context}],
+        ):
+            assistant_content += chunk
+            history[-1]["content"] = assistant_content
+            yield history, ""
+    except Exception as e:
+        error_msg = f"❌ 助手调用失败: {str(e)}"
+        history[-1]["content"] = error_msg
+        yield history, ""
+        return
+
+    # 确保最终状态
+    if not assistant_content:
+        history[-1]["content"] = "（助手无回复）"
+    yield history, ""
 
 
 def _format_structured_plan(plan: StructuredPlan) -> str:
