@@ -28,30 +28,16 @@ from core.scheduler import SchedulerManager, JobSpec
 
 
 # ==================== Gradio 版本兼容性检测 ====================
-def _detect_chatbot_format() -> str:
-    """检测 Chatbot 组件支持的消息格式"""
+def _check_chatbot_type_param() -> bool:
+    """检测 Chatbot 是否支持 type 参数"""
     try:
         sig = inspect.signature(gr.Chatbot.__init__)
-        if 'type' in sig.parameters:
-            # 支持 type 参数，使用 tuples 格式
-            return "tuples"
+        return 'type' in sig.parameters
     except Exception:
-        pass
-    # 检测默认格式：尝试创建一个测试 Chatbot
-    try:
-        # Gradio 4.x 新版本默认使用 messages 格式
-        version_parts = gr.__version__.split('.')
-        major = int(version_parts[0])
-        minor = int(version_parts[1]) if len(version_parts) > 1 else 0
-        # Gradio 4.44+ 默认 messages，之前版本默认 tuples
-        if major >= 4 and minor >= 44:
-            return "messages"
-    except Exception:
-        pass
-    return "tuples"
+        return False
 
 
-CHATBOT_FORMAT = _detect_chatbot_format()
+CHATBOT_SUPPORTS_TYPE = _check_chatbot_type_param()
 
 
 # 配置 Gradio 缓存目录
@@ -1119,18 +1105,10 @@ def assistant_chat(user_msg: str, chat_history: List[Any]):
 
     reply = app_state.assistant_planner.chat(user_msg)
 
-    # 根据 Gradio 版本使用正确的消息格式
-    if CHATBOT_FORMAT == "messages":
-        # 新版 Gradio 使用 messages 格式
-        new_messages = [
-            {"role": "user", "content": user_msg},
-            {"role": "assistant", "content": reply},
-        ]
-    else:
-        # 旧版 Gradio 使用 tuple 格式
-        new_messages = [(user_msg, reply)]
-
-    history = (chat_history or []) + new_messages
+    # 始终使用 tuple 格式 (user_msg, reply)
+    # 如果 Chatbot 支持 type 参数，我们会设置 type="tuples"
+    # 如果不支持，旧版 Gradio 默认就是 tuple 格式
+    history = (chat_history or []) + [(user_msg, reply)]
     return history, ""  # 返回空字符串清空输入框
 
 
@@ -1704,16 +1682,10 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 💬 智能任务规划助手")
                         gr.Markdown("告诉我你想让手机自动完成什么任务，我会帮你规划并执行。")
-                        # 根据 Gradio 版本创建 Chatbot
+                        # 创建 Chatbot，强制使用 tuples 格式（如果支持 type 参数）
                         chatbot_kwargs = {"height": 420, "label": "对话记录"}
-                        if CHATBOT_FORMAT == "tuples":
-                            # 尝试添加 type 参数（如果支持）
-                            try:
-                                sig = inspect.signature(gr.Chatbot.__init__)
-                                if 'type' in sig.parameters:
-                                    chatbot_kwargs["type"] = "tuples"
-                            except Exception:
-                                pass
+                        if CHATBOT_SUPPORTS_TYPE:
+                            chatbot_kwargs["type"] = "tuples"
                         assistant_chatbot = gr.Chatbot(**chatbot_kwargs)
                         assistant_input = gr.Textbox(
                             label="",
