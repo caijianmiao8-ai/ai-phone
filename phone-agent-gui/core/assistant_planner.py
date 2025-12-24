@@ -3,6 +3,7 @@
 封装对话式规划逻辑，支持 Tool Calling，复用 OpenAI/OpenRouter 客户端
 """
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -932,14 +933,24 @@ class AssistantPlanner:
                 json_lines = []
                 in_block = False
                 for line in lines:
-                    if line.startswith("```"):
+                    if line.strip().startswith("```"):
                         in_block = not in_block
                         continue
-                    if in_block or not line.startswith("```"):
+                    # 只在代码块内收集内容
+                    if in_block:
                         json_lines.append(line)
-                reply = "\n".join(json_lines)
+                reply = "\n".join(json_lines) if json_lines else reply
 
-            payload = json.loads(reply)
+            # 尝试直接解析，如果失败则尝试提取 JSON 对象
+            try:
+                payload = json.loads(reply)
+            except json.JSONDecodeError:
+                # 尝试提取第一个 JSON 对象
+                json_match = re.search(r'\{[\s\S]*\}', reply)
+                if json_match:
+                    payload = json.loads(json_match.group())
+                else:
+                    raise
             description = payload.get("task_description") or payload.get("summary") or "待执行任务"
             targets = payload.get("target_devices") or fallback_devices or []
             frequency = payload.get("frequency") or ""
@@ -1089,7 +1100,6 @@ class AssistantPlanner:
                 payload = json.loads(reply)
             except json.JSONDecodeError:
                 # 尝试提取第一个 JSON 对象
-                import re
                 json_match = re.search(r'\{[\s\S]*\}', reply)
                 if json_match:
                     payload = json.loads(json_match.group())
