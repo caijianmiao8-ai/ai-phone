@@ -156,7 +156,7 @@ class AppState:
             }
 
         try:
-            start_ok, start_message, _ = start_task_execution(parallel=True)
+            start_ok, start_message, context = start_task_execution(parallel=True)
         except Exception as exc:
             _clear_pending_task_state(available_devices or target_list)
             return {
@@ -172,6 +172,19 @@ class AppState:
                 "message": start_message or "任务启动失败",
                 "device_ids": available_devices,
             }
+
+        # 启动后台线程等待任务完成并清理状态
+        if context:
+            threads = context.get("threads", [])
+            results = context.get("results", {})
+            devices = context.get("devices", available_devices)
+
+            def cleanup_after_completion():
+                _wait_for_task_threads(threads)
+                _collect_execution_outcome(results, devices)
+
+            cleanup_thread = threading.Thread(target=cleanup_after_completion, daemon=True)
+            cleanup_thread.start()
 
         status = start_message or "任务已启动"
         if warning and warning != start_message:
@@ -313,19 +326,37 @@ class AppState:
                 stop_on_failure=stop_on_failure,
             )
 
-            # 返回计划信息
-            step_summaries = []
+            # 构建 Markdown 表格格式的步骤列表
+            step_table_rows = ["| 步骤 | 任务描述 | 设备 | 依赖 | 状态 |", "| --- | --- | --- | --- | --- |"]
             for i, step in enumerate(plan.steps):
-                deps = f" (依赖步骤 {step.depends_on})" if step.depends_on else ""
-                step_summaries.append(f"{i+1}. {step.description}{deps}")
+                devices_str = ", ".join(step.device_ids) if step.device_ids else "默认"
+                deps_str = ", ".join(str(d + 1) for d in step.depends_on) if step.depends_on else "-"
+                step_table_rows.append(f"| {i+1} | {step.description} | {devices_str} | {deps_str} | 待执行 |")
+
+            step_table = "\n".join(step_table_rows)
+
+            # 构建计划摘要表格
+            summary_table = "\n".join([
+                "| 项目 | 内容 |",
+                "| --- | --- |",
+                f"| 计划名称 | {plan.name} |",
+                f"| 计划ID | {plan.id} |",
+                f"| 步骤数量 | {len(plan.steps)} |",
+                f"| 并行执行 | {'是' if parallel_execution else '否'} |",
+                f"| 失败停止 | {'是' if stop_on_failure else '否'} |",
+            ])
+
+            # 组合完整消息
+            full_message = f"✅ 已创建任务计划「{name}」\n\n**计划概览：**\n{summary_table}\n\n**步骤详情：**\n{step_table}"
 
             return {
                 "success": True,
                 "plan_id": plan.id,
                 "name": plan.name,
                 "steps_count": len(plan.steps),
-                "steps": step_summaries,
-                "message": f"已创建任务计划「{name}」，包含 {len(plan.steps)} 个步骤",
+                "steps_table": step_table,
+                "summary_table": summary_table,
+                "message": full_message,
             }
         except Exception as e:
             return {"success": False, "message": f"创建计划失败: {str(e)}"}
@@ -358,6 +389,38 @@ class AppState:
                     time_range_hours=time_range_hours,
                 )
 
+            # 构建统计表格
+            stats_table = "\n".join([
+                "| 指标 | 数值 |",
+                "| --- | --- |",
+                f"| 任务总数 | {result.total_tasks} |",
+                f"| 成功率 | {result.success_rate:.1%} |",
+                f"| 平均耗时 | {result.average_duration:.1f}秒 |",
+            ])
+
+            # 构建问题表格
+            issues_table = ""
+            if result.common_issues:
+                issues_rows = ["| 序号 | 常见问题 |", "| --- | --- |"]
+                for i, issue in enumerate(result.common_issues[:3], 1):
+                    issues_rows.append(f"| {i} | {issue} |")
+                issues_table = "\n".join(issues_rows)
+
+            # 构建建议表格
+            recommendations_table = ""
+            if result.recommendations:
+                rec_rows = ["| 序号 | 改进建议 |", "| --- | --- |"]
+                for i, rec in enumerate(result.recommendations[:3], 1):
+                    rec_rows.append(f"| {i} | {rec} |")
+                recommendations_table = "\n".join(rec_rows)
+
+            # 组合完整消息
+            full_message = f"🔍 **任务分析报告**\n\n{result.summary}\n\n**统计数据：**\n{stats_table}"
+            if issues_table:
+                full_message += f"\n\n**常见问题：**\n{issues_table}"
+            if recommendations_table:
+                full_message += f"\n\n**改进建议：**\n{recommendations_table}"
+
             return {
                 "success": True,
                 "summary": result.summary,
@@ -369,6 +432,8 @@ class AppState:
                 "common_issues": result.common_issues[:3],
                 "recommendations": result.recommendations[:3],
                 "insights": result.insights[:3],
+                "message": full_message,
+                "stats_table": stats_table,
             }
         except Exception as e:
             return {"success": False, "message": f"分析失败: {str(e)}"}
@@ -385,6 +450,19 @@ class AppState:
                 time_range_hours=24,
             )
 
+            # 构建统计表格
+            stats_table = "\n".join([
+                "| 指标 | 数值 |",
+                "| --- | --- |",
+                f"| 统计周期 | 过去24小时 |",
+                f"| 任务总数 | {stats.total_tasks} |",
+                f"| 成功任务 | {stats.successful_tasks} |",
+                f"| 失败任务 | {stats.failed_tasks} |",
+                f"| 成功率 | {stats.success_rate:.1%} |",
+                f"| 平均耗时 | {stats.average_duration:.1f}秒 |",
+                f"| 总耗时 | {stats.total_duration:.1f}秒 |",
+            ])
+
             result = {
                 "success": True,
                 "period": "过去24小时",
@@ -396,20 +474,40 @@ class AppState:
                 "total_duration": f"{stats.total_duration:.1f}s",
             }
 
+            # 构建设备分布表格
+            device_table = ""
             if stats.tasks_by_device:
                 result["tasks_by_device"] = stats.tasks_by_device
+                device_rows = ["| 设备ID | 任务数 |", "| --- | --- |"]
+                for dev_id, count in stats.tasks_by_device.items():
+                    device_rows.append(f"| {dev_id} | {count} |")
+                device_table = "\n".join(device_rows)
 
+            # 构建错误表格
+            error_table = ""
             if include_recommendations and stats.most_common_errors:
                 result["common_errors"] = [
                     {"error": e["error"], "count": e["count"]}
                     for e in stats.most_common_errors[:3]
                 ]
+                error_rows = ["| 常见错误 | 次数 |", "| --- | --- |"]
+                for e in stats.most_common_errors[:3]:
+                    error_rows.append(f"| {e['error'][:50]} | {e['count']} |")
+                error_table = "\n".join(error_rows)
 
+            # 组合完整消息
             if stats.total_tasks == 0:
-                result["message"] = "过去24小时暂无任务执行记录"
+                full_message = "📊 **执行统计报告**\n\n过去24小时暂无任务执行记录"
             else:
-                status = "优秀" if stats.success_rate >= 0.9 else "良好" if stats.success_rate >= 0.7 else "需要关注"
-                result["message"] = f"执行情况{status}，成功率 {stats.success_rate:.1%}"
+                status = "优秀 ✅" if stats.success_rate >= 0.9 else "良好 👍" if stats.success_rate >= 0.7 else "需要关注 ⚠️"
+                full_message = f"📊 **执行统计报告** - 状态：{status}\n\n**统计概览：**\n{stats_table}"
+                if device_table:
+                    full_message += f"\n\n**设备分布：**\n{device_table}"
+                if error_table:
+                    full_message += f"\n\n**常见问题：**\n{error_table}"
+
+            result["message"] = full_message
+            result["stats_table"] = stats_table
 
             return result
         except Exception as e:
