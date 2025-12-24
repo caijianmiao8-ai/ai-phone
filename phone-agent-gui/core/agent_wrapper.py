@@ -68,19 +68,21 @@ def parse_duration_from_task(task: str) -> int:
             return tens + ones
         return 0
 
-    # 匹配模式
+    # 匹配模式（注意顺序：特殊模式优先）
     patterns = [
-        # 分钟
-        (r'(\d+(?:\.\d+)?)\s*分钟?', 60),
-        (r'([一二三四五六七八九十两半]+)\s*分钟?', 60),
+        # "X个半小时" 特殊处理（必须在普通小时模式之前）
+        (r'(\d+)\s*个半小时', 'half_hour'),
+        (r'([一二三四五六七八九十两]+)\s*个半小时', 'half_hour_cn'),
+        # 分钟（要求"分"后面是"钟"或者后面不是数字，避免误匹配"得了10分"）
+        (r'(\d+(?:\.\d+)?)\s*分钟', 60),
+        (r'(\d+(?:\.\d+)?)\s*分(?=[^数钟]|$)', 60),  # "10分视频" 但不匹配 "10分数"
+        (r'([一二三四五六七八九十两半]+)\s*分钟', 60),
         # 小时
         (r'(\d+(?:\.\d+)?)\s*(?:个)?小时', 3600),
         (r'([一二三四五六七八九十两半]+)\s*(?:个)?小时', 3600),
         # 秒
         (r'(\d+(?:\.\d+)?)\s*秒', 1),
         (r'([一二三四五六七八九十两半]+)\s*秒', 1),
-        # "个半小时" 特殊处理
-        (r'(\d+)\s*个半小时', 5400),  # 1.5小时 = 5400秒，但需要特殊处理
     ]
 
     for pattern, multiplier in patterns:
@@ -93,8 +95,8 @@ def parse_duration_from_task(task: str) -> int:
                 num = convert_cn_num(num_str)
 
             if num > 0:
-                # 特殊处理 "个半小时"
-                if '个半小时' in pattern:
+                # 特殊处理 "X个半小时"
+                if multiplier in ('half_hour', 'half_hour_cn'):
                     return int((num + 0.5) * 3600)
                 return int(num * multiplier)
 

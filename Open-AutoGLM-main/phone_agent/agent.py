@@ -242,7 +242,13 @@ class PhoneAgent:
             )
 
             screen_info = MessageBuilder.build_screen_info(current_app)
-            text_content = f"{user_prompt}\n\n{screen_info}"
+
+            # 第一步也包含时间和任务提示（如果有时间限制）
+            context_hint = ""
+            if self._exec_context and self._exec_context.max_duration_seconds > 0:
+                context_hint = self._exec_context.build_context_hint() + "\n\n"
+
+            text_content = f"{user_prompt}\n\n{context_hint}{screen_info}"
 
             self._context.append(
                 MessageBuilder.create_user_message(
