@@ -24,6 +24,10 @@ from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper, TaskResult
 from core.assistant_planner import AssistantPlanner, StructuredPlan, ChatResponse, ToolCallStatus
 from core.scheduler import SchedulerManager, JobSpec
+from core.task_history import TaskHistoryManager, TaskExecutionRecord
+from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, PlanStatus
+from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
+from core.task_analyzer import TaskAnalyzer, AnalysisResult
 
 
 # 配置 Gradio 缓存目录
@@ -97,6 +101,16 @@ class AppState:
         )
         self.scheduler: Optional[SchedulerManager] = None
         self.latest_plan: Optional[StructuredPlan] = None
+        # 任务历史、计划、队列、分析器
+        self.task_history = TaskHistoryManager()
+        self.task_plan_manager = TaskPlanManager()
+        self.task_queue_manager = TaskQueueManager(max_concurrent=3)
+        self.task_analyzer = TaskAnalyzer(
+            history_manager=self.task_history,
+            api_base=self.settings.assistant_api_base,
+            api_key=self.settings.assistant_api_key,
+            model=self.settings.assistant_model,
+        )
         # 注册工具处理器
         self._register_tool_handlers()
 
@@ -107,6 +121,10 @@ class AppState:
         self.assistant_planner.register_tool_handler("query_knowledge_base", self._tool_query_knowledge_base)
         self.assistant_planner.register_tool_handler("schedule_task", self._tool_schedule_task)
         self.assistant_planner.register_tool_handler("get_task_status", self._tool_get_task_status)
+        # 新增工具
+        self.assistant_planner.register_tool_handler("create_task_plan", self._tool_create_task_plan)
+        self.assistant_planner.register_tool_handler("analyze_task_history", self._tool_analyze_task_history)
+        self.assistant_planner.register_tool_handler("get_execution_summary", self._tool_get_execution_summary)
 
     def _tool_execute_task(
         self,
@@ -273,6 +291,129 @@ class AppState:
                 "is_running": self.is_task_running,
                 "devices": all_status,
             }
+
+    def _tool_create_task_plan(
+        self,
+        name: str,
+        steps: List[Dict[str, Any]],
+        description: str = "",
+        parallel_execution: bool = False,
+        stop_on_failure: bool = True,
+    ) -> dict:
+        """工具：创建任务计划（工作流）"""
+        if not steps:
+            return {"success": False, "message": "步骤列表不能为空"}
+
+        try:
+            plan = self.task_plan_manager.create_plan(
+                name=name,
+                description=description,
+                steps=steps,
+                parallel_execution=parallel_execution,
+                stop_on_failure=stop_on_failure,
+            )
+
+            # 返回计划信息
+            step_summaries = []
+            for i, step in enumerate(plan.steps):
+                deps = f" (依赖步骤 {step.depends_on})" if step.depends_on else ""
+                step_summaries.append(f"{i+1}. {step.description}{deps}")
+
+            return {
+                "success": True,
+                "plan_id": plan.id,
+                "name": plan.name,
+                "steps_count": len(plan.steps),
+                "steps": step_summaries,
+                "message": f"已创建任务计划「{name}」，包含 {len(plan.steps)} 个步骤",
+            }
+        except Exception as e:
+            return {"success": False, "message": f"创建计划失败: {str(e)}"}
+
+    def _tool_analyze_task_history(
+        self,
+        device_id: str = None,
+        task_pattern: str = None,
+        time_range_hours: int = 24,
+    ) -> dict:
+        """工具：分析历史任务执行情况"""
+        try:
+            # 更新分析器配置
+            self.task_analyzer.update_config(
+                api_base=self.settings.assistant_api_base,
+                api_key=self.settings.assistant_api_key,
+                model=self.settings.assistant_model,
+            )
+
+            # 尝试使用AI分析，如果失败则使用基础分析
+            try:
+                result = self.task_analyzer.analyze_with_ai(
+                    device_id=device_id,
+                    time_range_hours=time_range_hours,
+                    task_pattern=task_pattern,
+                )
+            except Exception:
+                result = self.task_analyzer.analyze_basic(
+                    device_id=device_id,
+                    time_range_hours=time_range_hours,
+                )
+
+            return {
+                "success": True,
+                "summary": result.summary,
+                "statistics": {
+                    "total_tasks": result.total_tasks,
+                    "success_rate": f"{result.success_rate:.1%}",
+                    "average_duration": f"{result.average_duration:.1f}s",
+                },
+                "common_issues": result.common_issues[:3],
+                "recommendations": result.recommendations[:3],
+                "insights": result.insights[:3],
+            }
+        except Exception as e:
+            return {"success": False, "message": f"分析失败: {str(e)}"}
+
+    def _tool_get_execution_summary(
+        self,
+        device_id: str = None,
+        include_recommendations: bool = True,
+    ) -> dict:
+        """工具：获取执行总结"""
+        try:
+            stats = self.task_history.get_statistics(
+                device_id=device_id,
+                time_range_hours=24,
+            )
+
+            result = {
+                "success": True,
+                "period": "过去24小时",
+                "total_tasks": stats.total_tasks,
+                "successful": stats.successful_tasks,
+                "failed": stats.failed_tasks,
+                "success_rate": f"{stats.success_rate:.1%}",
+                "average_duration": f"{stats.average_duration:.1f}s",
+                "total_duration": f"{stats.total_duration:.1f}s",
+            }
+
+            if stats.tasks_by_device:
+                result["tasks_by_device"] = stats.tasks_by_device
+
+            if include_recommendations and stats.most_common_errors:
+                result["common_errors"] = [
+                    {"error": e["error"], "count": e["count"]}
+                    for e in stats.most_common_errors[:3]
+                ]
+
+            if stats.total_tasks == 0:
+                result["message"] = "过去24小时暂无任务执行记录"
+            else:
+                status = "优秀" if stats.success_rate >= 0.9 else "良好" if stats.success_rate >= 0.7 else "需要关注"
+                result["message"] = f"执行情况{status}，成功率 {stats.success_rate:.1%}"
+
+            return result
+        except Exception as e:
+            return {"success": False, "message": f"获取总结失败: {str(e)}"}
 
     def _run_scheduled_task(self, spec: JobSpec) -> Tuple[bool, str]:
         """执行定时任务的回调，返回 (success, message)"""
@@ -1079,6 +1220,14 @@ def prepare_task_queue(
 def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> Optional[TaskResult]:
     """在单个设备上执行任务"""
     settings = app_state.settings
+
+    # 创建执行历史记录
+    record = app_state.task_history.create_record(
+        task_description=task,
+        device_id=device_id,
+        max_steps=settings.max_steps,
+    )
+
     agent = AgentWrapper(
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
@@ -1094,16 +1243,23 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
         use_knowledge_base=use_knowledge,
     )
 
-    agent.on_log_callback = lambda msg, did=device_id: app_state.add_device_log(did, msg)
+    # 日志回调：同时记录到设备状态和历史记录
+    def log_callback(msg: str, did: str = device_id, rec_id: str = record.id):
+        app_state.add_device_log(did, msg)
+        app_state.task_history.add_log(rec_id, msg)
+
+    agent.on_log_callback = log_callback
     app_state.set_device_agent(device_id, agent)
     app_state.set_device_status(device_id, "🚀 执行中")
 
     task_gen = agent.run_task(task)
     task_result: Optional[TaskResult] = None
+    steps_executed = 0
 
     try:
         while True:
             step_result = next(task_gen)
+            steps_executed += 1
             if step_result.screenshot:
                 app_state.set_device_screenshot(device_id, step_result.screenshot)
             status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
@@ -1112,11 +1268,32 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
         task_result = stop.value
         if task_result and not task_result.success:
             app_state.set_device_status(device_id, f"❌ {task_result.message}")
+            app_state.task_history.finish_record(
+                record_id=record.id,
+                success=False,
+                message=task_result.message,
+                steps=task_result.steps_executed,
+                error=task_result.message,
+            )
         else:
             app_state.set_device_status(device_id, "✅ 任务完成")
+            app_state.task_history.finish_record(
+                record_id=record.id,
+                success=True,
+                message="任务完成",
+                steps=task_result.steps_executed if task_result else steps_executed,
+            )
     except Exception as e:
-        app_state.add_device_log(device_id, f"任务执行错误: {str(e)}")
+        error_msg = str(e)
+        app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
         app_state.set_device_status(device_id, f"❌ {e}")
+        app_state.task_history.finish_record(
+            record_id=record.id,
+            success=False,
+            message=error_msg,
+            steps=steps_executed,
+            error=error_msg,
+        )
     finally:
         app_state.set_device_agent(device_id, None)
 

@@ -177,6 +177,110 @@ AVAILABLE_TOOLS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task_plan",
+            "description": "创建包含多个步骤的任务计划（工作流）。当用户需要执行复杂的多步骤任务时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "计划名称，如'购物流程'、'批量发消息'"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "计划的整体描述"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "任务步骤列表",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {
+                                    "type": "string",
+                                    "description": "步骤的任务描述（给执行AI的指令）"
+                                },
+                                "device_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "执行此步骤的设备ID列表"
+                                },
+                                "depends_on": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "依赖的步骤索引（从0开始）"
+                                },
+                                "condition": {
+                                    "type": "string",
+                                    "enum": ["always", "on_success", "on_failure"],
+                                    "description": "执行条件：always=总是执行, on_success=前置步骤成功时执行, on_failure=前置步骤失败时执行"
+                                }
+                            },
+                            "required": ["description"]
+                        }
+                    },
+                    "parallel_execution": {
+                        "type": "boolean",
+                        "description": "是否并行执行无依赖的步骤，默认false"
+                    },
+                    "stop_on_failure": {
+                        "type": "boolean",
+                        "description": "某步骤失败时是否停止整个计划，默认true"
+                    }
+                },
+                "required": ["name", "steps"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_task_history",
+            "description": "分析历史任务执行情况，识别问题模式并给出改进建议。当用户想了解任务执行情况或需要优化时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": "指定设备ID进行分析，不指定则分析所有设备"
+                    },
+                    "task_pattern": {
+                        "type": "string",
+                        "description": "任务描述关键词，用于筛选特定类型的任务"
+                    },
+                    "time_range_hours": {
+                        "type": "integer",
+                        "description": "分析的时间范围（小时），默认24小时"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_execution_summary",
+            "description": "获取任务执行的总结报告。当用户询问执行结果、成功率、效率等信息时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": "指定设备ID，不指定则返回所有设备的汇总"
+                    },
+                    "include_recommendations": {
+                        "type": "boolean",
+                        "description": "是否包含改进建议，默认true"
+                    }
+                },
+                "required": []
+            }
+        }
     }
 ]
 
@@ -202,11 +306,26 @@ class AssistantPlanner:
 
 ## 你的能力
 你可以通过工具调用来：
-1. **execute_task**: 立即执行任务
+1. **execute_task**: 立即执行单个任务
 2. **list_devices**: 查看可用设备
 3. **query_knowledge_base**: 查询知识库
 4. **schedule_task**: 创建定时任务
 5. **get_task_status**: 查询任务状态
+6. **create_task_plan**: 创建多步骤任务计划（工作流），支持步骤依赖和条件执行
+7. **analyze_task_history**: 分析历史执行情况，识别问题并给出建议
+8. **get_execution_summary**: 获取执行总结报告
+
+## 多步骤任务计划
+当用户需要执行复杂任务时（如"完整购物流程"、"批量操作"），应使用 create_task_plan 创建工作流：
+- 将复杂任务拆分为多个步骤
+- 设置步骤之间的依赖关系（depends_on）
+- 设置执行条件（on_success/on_failure）
+- 系统会按顺序执行并自动处理依赖
+
+## 任务分析
+当用户询问"执行情况如何"、"成功率"、"有什么问题"时，使用分析工具：
+- analyze_task_history: 深度分析，识别问题模式
+- get_execution_summary: 快速获取统计数据
 
 ## 任务描述的编写规范（非常重要）
 生成的任务描述必须遵循以下原则：
