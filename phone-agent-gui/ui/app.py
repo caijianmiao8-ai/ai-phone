@@ -92,6 +92,8 @@ class AppState:
         self.device_states: Dict[str, DeviceTaskState] = defaultdict(DeviceTaskState)
         self.state_lock = threading.Lock()
         self.task_queue: List[dict] = []
+        # 定时任务待执行队列（当有任务执行时暂存）
+        self.pending_scheduled_tasks: List[dict] = []
         # AI 助手与调度
         self.assistant_planner = AssistantPlanner(
             api_base=self.settings.assistant_api_base,
@@ -182,6 +184,8 @@ class AppState:
             def cleanup_after_completion():
                 _wait_for_task_threads(threads)
                 _collect_execution_outcome(results, devices)
+                # 任务完成后处理待执行的定时任务队列
+                _process_pending_scheduled_tasks()
 
             cleanup_thread = threading.Thread(target=cleanup_after_completion, daemon=True)
             cleanup_thread.start()
@@ -1583,11 +1587,67 @@ def get_task_status() -> str:
 
 # ==================== AI 助手与调度 ====================
 
+def _process_pending_scheduled_tasks():
+    """处理待执行的定时任务队列"""
+    while True:
+        with app_state.state_lock:
+            if app_state.is_task_running:
+                # 还有任务在执行，不处理队列
+                return
+            if not app_state.pending_scheduled_tasks:
+                # 队列为空
+                return
+            # 取出下一个待执行的任务
+            pending = app_state.pending_scheduled_tasks.pop(0)
+
+        job = pending["job"]
+        app_state.add_log(f"🔄 开始执行排队中的定时任务: {job.description}")
+
+        success, warning, target_devices = prepare_task_queue(
+            job.description, job.use_knowledge, job.device_ids
+        )
+        if not success:
+            app_state.add_log(f"❌ 定时任务准备失败: {warning}")
+            # 继续处理下一个
+            continue
+
+        start_ok, start_message, context = start_task_execution(parallel=job.parallel)
+        if not start_ok or context is None:
+            app_state.add_log(f"❌ 定时任务启动失败: {start_message}")
+            if start_ok and app_state.is_task_running:
+                app_state.is_task_running = False
+            continue
+
+        # 启动后台线程等待完成
+        def cleanup_and_continue():
+            _wait_for_task_threads(context.get("threads"))
+            _collect_execution_outcome(
+                context.get("results", {}), context.get("devices", target_devices)
+            )
+            # 完成后继续处理队列
+            _process_pending_scheduled_tasks()
+
+        threading.Thread(target=cleanup_and_continue, daemon=True).start()
+        return  # 返回，等待这个任务完成后再处理下一个
+
+
 def _ensure_scheduler() -> SchedulerManager:
     if app_state.scheduler:
         return app_state.scheduler
 
     def _task_executor(job: JobSpec):
+        # 检查是否有任务正在执行
+        with app_state.state_lock:
+            if app_state.is_task_running:
+                # 加入待执行队列
+                queue_pos = len(app_state.pending_scheduled_tasks) + 1
+                app_state.pending_scheduled_tasks.append({
+                    "job": job,
+                    "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                app_state.add_log(f"⏳ 定时任务已排队 (位置 #{queue_pos}): {job.description}")
+                return True, f"✅ 任务已加入队列（位置 #{queue_pos}），当前任务完成后自动执行"
+
         success, warning, target_devices = prepare_task_queue(
             job.description, job.use_knowledge, job.device_ids
         )
@@ -1604,6 +1664,9 @@ def _ensure_scheduler() -> SchedulerManager:
         success, final_status = _collect_execution_outcome(
             context.get("results", {}), context.get("devices", target_devices)
         )
+
+        # 任务完成后处理待执行队列
+        threading.Thread(target=_process_pending_scheduled_tasks, daemon=True).start()
 
         status_parts = [start_message or ""]
         if warning and warning != start_message:

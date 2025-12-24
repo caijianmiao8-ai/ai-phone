@@ -44,12 +44,67 @@ class ToolCallResult:
     status: ToolCallStatus
     result: Any = None
     error: Optional[str] = None
+    arguments: Dict[str, Any] = field(default_factory=dict)
 
     def to_message(self) -> str:
         """转换为可读消息"""
         if self.status == ToolCallStatus.ERROR:
             return f"❌ {self.tool_name} 执行失败: {self.error}"
         return f"✅ {self.tool_name} 执行成功"
+
+    def to_detailed_message(self) -> str:
+        """转换为详细的可读消息，包含执行内容"""
+        if self.status == ToolCallStatus.ERROR:
+            return f"❌ **执行失败**: {self.error}"
+
+        # 根据工具类型生成不同的详细信息
+        if self.tool_name == "execute_task":
+            task_desc = self.arguments.get("task_description", "")
+            devices = self.arguments.get("device_ids") or [self.arguments.get("device_id", "")]
+            devices_str = ", ".join(d for d in devices if d) or "默认设备"
+            result_msg = ""
+            if isinstance(self.result, dict):
+                result_msg = self.result.get("message", "")
+            return (
+                f"✅ **任务已下发**\n\n"
+                f"| 项目 | 内容 |\n"
+                f"| --- | --- |\n"
+                f"| 📱 发送给设备的指令 | {task_desc} |\n"
+                f"| 🎯 目标设备 | {devices_str} |\n"
+                f"| 📝 执行状态 | {result_msg or '已启动'} |"
+            )
+        elif self.tool_name == "schedule_task":
+            task_desc = self.arguments.get("task_description", "")
+            schedule_type = self.arguments.get("schedule_type", "")
+            schedule_value = self.arguments.get("schedule_value", "")
+            devices = self.arguments.get("device_ids") or []
+            devices_str = ", ".join(devices) if devices else "默认设备"
+            type_map = {"once": "一次性", "interval": "间隔重复", "daily": "每日定时"}
+            return (
+                f"✅ **定时任务已创建**\n\n"
+                f"| 项目 | 内容 |\n"
+                f"| --- | --- |\n"
+                f"| 📱 发送给设备的指令 | {task_desc} |\n"
+                f"| ⏰ 调度类型 | {type_map.get(schedule_type, schedule_type)} |\n"
+                f"| 🕐 调度时间 | {schedule_value} |\n"
+                f"| 🎯 目标设备 | {devices_str} |"
+            )
+        elif self.tool_name == "create_task_plan":
+            name = self.arguments.get("name", "")
+            steps = self.arguments.get("steps", [])
+            result_msg = ""
+            if isinstance(self.result, dict):
+                result_msg = self.result.get("message", "")
+            if result_msg:
+                return f"✅ **任务计划已创建**: {name}\n\n{result_msg}"
+            steps_text = "\n".join(f"  {i+1}. {s.get('description', '')}" for i, s in enumerate(steps))
+            return f"✅ **任务计划已创建**: {name}\n\n**步骤:**\n{steps_text}"
+        else:
+            # 其他工具返回简单消息
+            result_msg = ""
+            if isinstance(self.result, dict):
+                result_msg = self.result.get("message", "")
+            return f"✅ **{self.tool_name}** 执行成功" + (f": {result_msg}" if result_msg else "")
 
 
 @dataclass
@@ -69,7 +124,8 @@ class ChatResponse:
         if self.plan_text:
             parts.append(self.plan_text)
         for tc in self.tool_calls:
-            parts.append(tc.to_message())
+            # 使用详细消息，清晰展示执行内容
+            parts.append(tc.to_detailed_message())
         return "\n\n".join(parts) if parts else ""
 
 
@@ -347,13 +403,22 @@ class AssistantPlanner:
 
 ## 对话流程
 1. 理解用户需求，必要时追问具体信息（如"发给谁？内容是什么？"）
-2. 信息充足后，先向用户确认计划
-3. 确认后调用工具执行
+2. 信息充足后，先简要说明你理解的任务和将要执行的操作
+3. 调用工具执行时，先用口语向用户解释你在做什么
+
+## 回复格式要求（非常重要！）
+**每次调用工具前，必须先用简短的口语告诉用户你在做什么。**
+
+示例：
+- 用户说"帮我打开微信"
+- 你应该回复：「好的，我来帮你打开微信。」然后调用 execute_task
+- 不要只调用工具不说话！
 
 ## 对话风格
 - 简洁、专业、友好
 - 主动追问缺失的关键信息
-- 使用与用户相同的语言"""
+- 使用与用户相同的语言
+- **每次执行操作前都要口语说明你在做什么**"""
 
         self.system_prompt_no_tools = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
 
@@ -459,7 +524,8 @@ class AssistantPlanner:
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.ERROR,
-                error=f"未注册的工具: {tool_name}"
+                error=f"未注册的工具: {tool_name}",
+                arguments=arguments,
             )
 
         try:
@@ -480,17 +546,20 @@ class AssistantPlanner:
                     status=ToolCallStatus.ERROR,
                     result=result,
                     error=error_message or "工具执行失败",
+                    arguments=arguments,
                 )
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.SUCCESS,
-                result=result
+                result=result,
+                arguments=arguments,
             )
         except Exception as e:
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.ERROR,
-                error=str(e)
+                error=str(e),
+                arguments=arguments,
             )
 
     def _build_plan_text(self, tool_calls: List[Dict[str, Any]]) -> str:
@@ -719,7 +788,7 @@ class AssistantPlanner:
                 else:
                     result = self._execute_tool(tool_name, arguments)
                     tool_calls_results.append(result)
-                    yield f"\n\n{result.to_message()}"
+                    yield f"\n\n{result.to_detailed_message()}"
 
             plan_text = ""
             if self.require_confirmation and pending_tool_calls:
