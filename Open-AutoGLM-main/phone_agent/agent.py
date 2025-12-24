@@ -1,8 +1,9 @@
 """Main PhoneAgent class for orchestrating phone automation."""
 
 import json
+import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from phone_agent.actions import ActionHandler
@@ -22,6 +23,8 @@ class AgentConfig:
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
+    # 新增：时间限制（秒），0表示不限制
+    max_duration_seconds: int = 0
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -37,6 +40,57 @@ class StepResult:
     action: dict[str, Any] | None
     thinking: str
     message: str | None = None
+
+
+@dataclass
+class ExecutionContext:
+    """执行上下文，用于跟踪任务状态"""
+    task: str = ""
+    start_time: float = field(default_factory=time.time)
+    max_duration_seconds: int = 0
+    step_count: int = 0
+    max_steps: int = 100
+
+    def get_elapsed_seconds(self) -> int:
+        """获取已执行时间（秒）"""
+        return int(time.time() - self.start_time)
+
+    def get_remaining_seconds(self) -> int:
+        """获取剩余时间（秒），-1表示无限制"""
+        if self.max_duration_seconds <= 0:
+            return -1
+        remaining = self.max_duration_seconds - self.get_elapsed_seconds()
+        return max(0, remaining)
+
+    def is_time_exceeded(self) -> bool:
+        """检查是否超时"""
+        if self.max_duration_seconds <= 0:
+            return False
+        return self.get_elapsed_seconds() >= self.max_duration_seconds
+
+    def build_context_hint(self) -> str:
+        """构建上下文提示，注入到每一步"""
+        elapsed = self.get_elapsed_seconds()
+        remaining = self.get_remaining_seconds()
+
+        hints = []
+        hints.append(f"【当前任务】{self.task}")
+        hints.append(f"【执行进度】第 {self.step_count} 步 / 最多 {self.max_steps} 步")
+
+        if self.max_duration_seconds > 0:
+            elapsed_min = elapsed // 60
+            elapsed_sec = elapsed % 60
+            remaining_min = remaining // 60
+            remaining_sec = remaining % 60
+            hints.append(f"【时间状态】已执行 {elapsed_min}分{elapsed_sec}秒，剩余约 {remaining_min}分{remaining_sec}秒")
+
+            # 时间提醒
+            if remaining < 30:
+                hints.append("⚠️ 时间即将结束，请尽快完成当前操作并调用 finish() 结束任务")
+            elif remaining < 60:
+                hints.append("⏰ 剩余时间不足1分钟，请准备结束任务")
+
+        return "\n".join(hints)
 
 
 class PhoneAgent:
@@ -80,6 +134,7 @@ class PhoneAgent:
 
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
+        self._exec_context: ExecutionContext | None = None
 
     def run(self, task: str) -> str:
         """
@@ -93,6 +148,12 @@ class PhoneAgent:
         """
         self._context = []
         self._step_count = 0
+        self._exec_context = ExecutionContext(
+            task=task,
+            start_time=time.time(),
+            max_duration_seconds=self.agent_config.max_duration_seconds,
+            max_steps=self.agent_config.max_steps,
+        )
 
         # First step with user prompt
         result = self._execute_step(task, is_first=True)
@@ -102,6 +163,11 @@ class PhoneAgent:
 
         # Continue until finished or max steps reached
         while self._step_count < self.agent_config.max_steps:
+            # 检查时间限制
+            if self._exec_context and self._exec_context.is_time_exceeded():
+                elapsed = self._exec_context.get_elapsed_seconds()
+                return f"已达到时间限制 ({elapsed}秒)，任务自动结束"
+
             result = self._execute_step(is_first=False)
 
             if result.finished:
@@ -126,18 +192,43 @@ class PhoneAgent:
         if is_first and not task:
             raise ValueError("Task is required for the first step")
 
+        # 初始化执行上下文
+        if is_first:
+            self._exec_context = ExecutionContext(
+                task=task,
+                start_time=time.time(),
+                max_duration_seconds=self.agent_config.max_duration_seconds,
+                max_steps=self.agent_config.max_steps,
+            )
+
+        # 检查时间限制
+        if self._exec_context and self._exec_context.is_time_exceeded():
+            elapsed = self._exec_context.get_elapsed_seconds()
+            return StepResult(
+                success=True,
+                finished=True,
+                action={"_metadata": "finish", "message": f"已达到时间限制 ({elapsed}秒)"},
+                thinking="时间限制已到，自动结束任务",
+                message=f"已达到时间限制 ({elapsed}秒)，任务自动结束",
+            )
+
         return self._execute_step(task, is_first)
 
     def reset(self) -> None:
         """Reset the agent state for a new task."""
         self._context = []
         self._step_count = 0
+        self._exec_context = None
 
     def _execute_step(
         self, user_prompt: str | None = None, is_first: bool = False
     ) -> StepResult:
         """Execute a single step of the agent loop."""
         self._step_count += 1
+
+        # 更新执行上下文
+        if self._exec_context:
+            self._exec_context.step_count = self._step_count
 
         # Capture current screen state
         device_factory = get_device_factory()
@@ -160,7 +251,14 @@ class PhoneAgent:
             )
         else:
             screen_info = MessageBuilder.build_screen_info(current_app)
-            text_content = f"** Screen Info **\n\n{screen_info}"
+
+            # 构建上下文提示（包含任务提醒、进度、时间状态）
+            context_hint = ""
+            if self._exec_context:
+                context_hint = self._exec_context.build_context_hint()
+
+            # 在每一步都提醒 AI 当前任务和状态
+            text_content = f"** 执行状态 **\n\n{context_hint}\n\n** Screen Info **\n\n{screen_info}"
 
             self._context.append(
                 MessageBuilder.create_user_message(
