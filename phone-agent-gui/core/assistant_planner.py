@@ -30,6 +30,54 @@ class StructuredPlan:
         }
 
 
+@dataclass
+class TaskAnalysisResult:
+    """任务执行分析结果"""
+    task_description: str = ""
+    device_id: str = ""
+    success_judgment: bool = False  # AI判断是否成功
+    confidence: str = "中"  # 高/中/低
+    issues_found: List[str] = field(default_factory=list)  # 发现的问题
+    strategy_suggestions: List[str] = field(default_factory=list)  # 策略建议
+    summary: str = ""  # 总结
+    raw_response: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_description": self.task_description,
+            "device_id": self.device_id,
+            "success_judgment": self.success_judgment,
+            "confidence": self.confidence,
+            "issues_found": self.issues_found,
+            "strategy_suggestions": self.strategy_suggestions,
+            "summary": self.summary,
+        }
+
+    def to_markdown(self) -> str:
+        """转换为 Markdown 格式显示"""
+        status = "✅ 成功" if self.success_judgment else "❌ 失败"
+        parts = [
+            f"## 任务执行分析",
+            f"**任务**: {self.task_description}",
+            f"**设备**: {self.device_id}",
+            f"**判定**: {status} (置信度: {self.confidence})",
+            "",
+            f"### 📝 总结",
+            self.summary,
+        ]
+        if self.issues_found:
+            parts.append("")
+            parts.append("### ⚠️ 发现的问题")
+            for issue in self.issues_found:
+                parts.append(f"- {issue}")
+        if self.strategy_suggestions:
+            parts.append("")
+            parts.append("### 💡 策略建议")
+            for suggestion in self.strategy_suggestions:
+                parts.append(f"- {suggestion}")
+        return "\n".join(parts)
+
+
 class ToolCallStatus(Enum):
     """工具调用状态"""
     SUCCESS = "success"
@@ -910,4 +958,148 @@ class AssistantPlanner:
                 time_requirement=time_requirement,
                 frequency="",
                 raw_text=raw_reply,
+            )
+
+    def analyze_task_execution(
+        self,
+        task_description: str,
+        device_id: str,
+        success: bool,
+        steps_executed: int,
+        duration_seconds: float,
+        logs: List[str],
+        error_message: Optional[str] = None,
+    ) -> TaskAnalysisResult:
+        """
+        分析任务执行结果，判断是否成功完成，识别问题并给出策略建议
+
+        Args:
+            task_description: 任务描述
+            device_id: 设备ID
+            success: 程序判定的成功状态
+            steps_executed: 执行的步骤数
+            duration_seconds: 执行时长（秒）
+            logs: 执行日志列表
+            error_message: 错误信息（如有）
+
+        Returns:
+            TaskAnalysisResult: 分析结果
+        """
+        # 构建日志摘要（限制长度）
+        log_text = "\n".join(logs[-50:]) if logs else "无日志"
+        if len(log_text) > 3000:
+            log_text = log_text[-3000:]
+
+        duration_str = f"{int(duration_seconds // 60)}分{int(duration_seconds % 60)}秒"
+
+        analysis_prompt = f"""请分析以下手机自动化任务的执行情况，判断任务是否真正完成，识别问题并给出改进建议。
+
+## 任务信息
+- **任务描述**: {task_description}
+- **执行设备**: {device_id}
+- **程序状态**: {"成功" if success else "失败"}
+- **执行步数**: {steps_executed} 步
+- **执行时长**: {duration_str}
+- **错误信息**: {error_message or "无"}
+
+## 执行日志
+```
+{log_text}
+```
+
+## 请返回 JSON 格式的分析结果
+{{
+    "success_judgment": true/false,  // 你判断任务是否真正完成了预期目标
+    "confidence": "高/中/低",  // 判断的置信度
+    "issues_found": ["问题1", "问题2"],  // 发现的问题列表
+    "strategy_suggestions": ["建议1", "建议2"],  // 改进策略建议
+    "summary": "简要总结任务执行情况，2-3句话"
+}}
+
+## 分析要点
+1. **成功判断**: 不要只看程序状态，要根据日志判断任务是否真正达成目标
+   - 例如：任务是"浏览10分钟视频"，但只执行了2分钟就结束，应判断为失败
+   - 例如：任务是"发送微信消息"，但遇到登录页面没有完成，应判断为失败
+2. **问题识别**:
+   - 是否遇到登录/验证障碍？
+   - 是否有重复无效的操作？
+   - 是否正确理解了时间要求？
+   - 是否因为超时或步数限制提前结束？
+3. **策略建议**:
+   - 如何优化任务描述使AI更准确理解？
+   - 是否需要调整时间限制或步数限制？
+   - 是否需要预先处理登录问题？
+
+请只返回 JSON，不要添加其他说明。"""
+
+        try:
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的任务执行分析师，擅长分析自动化任务的执行日志，判断任务是否成功完成，识别问题并给出改进建议。"},
+                    {"role": "user", "content": analysis_prompt},
+                ],
+                temperature=0.2,
+            )
+            raw_reply = (response.choices[0].message.content or "").strip()
+            return self._parse_analysis_result(
+                raw_reply, task_description, device_id, success
+            )
+        except Exception as e:
+            return TaskAnalysisResult(
+                task_description=task_description,
+                device_id=device_id,
+                success_judgment=success,
+                confidence="低",
+                issues_found=[f"分析失败: {str(e)}"],
+                strategy_suggestions=[],
+                summary=f"无法完成分析: {str(e)}",
+                raw_response="",
+            )
+
+    def _parse_analysis_result(
+        self,
+        raw_reply: str,
+        task_description: str,
+        device_id: str,
+        fallback_success: bool,
+    ) -> TaskAnalysisResult:
+        """解析分析结果 JSON"""
+        try:
+            # 尝试提取 JSON
+            reply = raw_reply.strip()
+            if reply.startswith("```"):
+                lines = reply.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block or not line.startswith("```"):
+                        json_lines.append(line)
+                reply = "\n".join(json_lines)
+
+            payload = json.loads(reply)
+            return TaskAnalysisResult(
+                task_description=task_description,
+                device_id=device_id,
+                success_judgment=bool(payload.get("success_judgment", fallback_success)),
+                confidence=str(payload.get("confidence", "中")),
+                issues_found=list(payload.get("issues_found", [])),
+                strategy_suggestions=list(payload.get("strategy_suggestions", [])),
+                summary=str(payload.get("summary", "")),
+                raw_response=raw_reply,
+            )
+        except Exception:
+            return TaskAnalysisResult(
+                task_description=task_description,
+                device_id=device_id,
+                success_judgment=fallback_success,
+                confidence="低",
+                issues_found=["无法解析分析结果"],
+                strategy_suggestions=[],
+                summary=raw_reply[:200] if raw_reply else "分析结果解析失败",
+                raw_response=raw_reply,
             )

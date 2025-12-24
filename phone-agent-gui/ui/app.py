@@ -22,7 +22,7 @@ from core.device_registry import DeviceRegistry
 from core.file_transfer import FileTransferManager, FileInfo, FileType
 from core.adb_helper import ADBHelper
 from core.agent_wrapper import AgentWrapper, TaskResult
-from core.assistant_planner import AssistantPlanner, StructuredPlan, ChatResponse, ToolCallStatus
+from core.assistant_planner import AssistantPlanner, StructuredPlan, ChatResponse, ToolCallStatus, TaskAnalysisResult
 from core.scheduler import SchedulerManager, JobSpec
 from core.task_history import TaskHistoryManager, TaskExecutionRecord
 from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, PlanStatus
@@ -113,6 +113,8 @@ class AppState:
             api_key=self.settings.assistant_api_key,
             model=self.settings.assistant_model,
         )
+        # 任务分析结果缓存 {record_id: TaskAnalysisResult}
+        self.task_analysis_results: Dict[str, TaskAnalysisResult] = {}
         # 注册工具处理器
         self._register_tool_handlers()
 
@@ -578,6 +580,27 @@ class AppState:
         with self.state_lock:
             logs = self.device_states[device_id].logs
         return "\n".join(logs) if logs else "暂无日志"
+
+    def store_task_analysis(self, record_id: str, analysis: TaskAnalysisResult):
+        """存储任务分析结果"""
+        with self.state_lock:
+            self.task_analysis_results[record_id] = analysis
+            # 限制缓存大小，保留最近100条
+            if len(self.task_analysis_results) > 100:
+                oldest_keys = list(self.task_analysis_results.keys())[:-100]
+                for key in oldest_keys:
+                    del self.task_analysis_results[key]
+
+    def get_task_analysis(self, record_id: str) -> Optional[TaskAnalysisResult]:
+        """获取任务分析结果"""
+        with self.state_lock:
+            return self.task_analysis_results.get(record_id)
+
+    def get_recent_analyses(self, limit: int = 10) -> List[TaskAnalysisResult]:
+        """获取最近的分析结果列表"""
+        with self.state_lock:
+            items = list(self.task_analysis_results.values())
+            return items[-limit:] if items else []
 
     def snapshot_states(self) -> Dict[str, DeviceTaskState]:
         with self.state_lock:
@@ -1357,6 +1380,8 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
     task_gen = agent.run_task(task)
     task_result: Optional[TaskResult] = None
     steps_executed = 0
+    task_success = False
+    error_message = None
 
     try:
         while True:
@@ -1377,6 +1402,8 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
                 steps=task_result.steps_executed,
                 error=task_result.message,
             )
+            task_success = False
+            error_message = task_result.message
         else:
             app_state.set_device_status(device_id, "✅ 任务完成")
             app_state.task_history.finish_record(
@@ -1385,6 +1412,7 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
                 message="任务完成",
                 steps=task_result.steps_executed if task_result else steps_executed,
             )
+            task_success = True
     except Exception as e:
         error_msg = str(e)
         app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
@@ -1396,8 +1424,47 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
             steps=steps_executed,
             error=error_msg,
         )
+        task_success = False
+        error_message = error_msg
     finally:
         app_state.set_device_agent(device_id, None)
+
+    # 任务完成后执行AI分析（如果启用）
+    if getattr(settings, 'enable_task_analysis', True):
+        try:
+            # 获取执行记录的日志
+            updated_record = app_state.task_history.get_record(record.id)
+            logs = updated_record.logs if updated_record else []
+            duration = updated_record.duration_seconds if updated_record else 0.0
+
+            # 调用AI分析
+            app_state.add_device_log(device_id, "🔍 正在分析任务执行情况...")
+            analysis = app_state.assistant_planner.analyze_task_execution(
+                task_description=task,
+                device_id=device_id,
+                success=task_success,
+                steps_executed=steps_executed,
+                duration_seconds=duration,
+                logs=logs,
+                error_message=error_message,
+            )
+
+            # 存储分析结果
+            app_state.store_task_analysis(record.id, analysis)
+
+            # 记录分析摘要到日志
+            app_state.add_device_log(device_id, "━" * 40)
+            app_state.add_device_log(device_id, "📊 任务分析结果:")
+            status_icon = "✅" if analysis.success_judgment else "❌"
+            app_state.add_device_log(device_id, f"   判定: {status_icon} {'成功' if analysis.success_judgment else '失败'} (置信度: {analysis.confidence})")
+            app_state.add_device_log(device_id, f"   总结: {analysis.summary}")
+            if analysis.issues_found:
+                app_state.add_device_log(device_id, f"   问题: {'; '.join(analysis.issues_found[:3])}")
+            if analysis.strategy_suggestions:
+                app_state.add_device_log(device_id, f"   建议: {'; '.join(analysis.strategy_suggestions[:3])}")
+            app_state.add_device_log(device_id, "━" * 40)
+        except Exception as e:
+            app_state.add_device_log(device_id, f"⚠️ 任务分析失败: {str(e)}")
 
     return task_result
 
