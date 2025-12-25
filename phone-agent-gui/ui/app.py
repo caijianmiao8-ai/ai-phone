@@ -191,8 +191,6 @@ class AppState:
         self.assistant_planner.register_tool_handler("query_knowledge_base", self._tool_query_knowledge_base)
         self.assistant_planner.register_tool_handler("schedule_task", self._tool_schedule_task)
         self.assistant_planner.register_tool_handler("get_task_status", self._tool_get_task_status)
-        # 新增工具
-        self.assistant_planner.register_tool_handler("create_task_plan", self._tool_create_task_plan)
         self.assistant_planner.register_tool_handler("analyze_task_history", self._tool_analyze_task_history)
         self.assistant_planner.register_tool_handler("get_execution_summary", self._tool_get_execution_summary)
 
@@ -390,62 +388,6 @@ class AppState:
                 "is_running": self.is_task_running,
                 "devices": all_status,
             }
-
-    def _tool_create_task_plan(
-        self,
-        name: str,
-        steps: List[Dict[str, Any]],
-        description: str = "",
-        parallel_execution: bool = False,
-        stop_on_failure: bool = True,
-    ) -> dict:
-        """工具：创建任务计划（工作流）"""
-        if not steps:
-            return {"success": False, "message": "步骤列表不能为空"}
-
-        try:
-            plan = self.task_plan_manager.create_plan(
-                name=name,
-                description=description,
-                steps=steps,
-                parallel_execution=parallel_execution,
-                stop_on_failure=stop_on_failure,
-            )
-
-            # 构建 Markdown 表格格式的步骤列表
-            step_table_rows = ["| 步骤 | 任务描述 | 设备 | 依赖 | 状态 |", "| --- | --- | --- | --- | --- |"]
-            for i, step in enumerate(plan.steps):
-                devices_str = ", ".join(step.device_ids) if step.device_ids else "默认"
-                deps_str = ", ".join(str(d + 1) for d in step.depends_on) if step.depends_on else "-"
-                step_table_rows.append(f"| {i+1} | {step.description} | {devices_str} | {deps_str} | 待执行 |")
-
-            step_table = "\n".join(step_table_rows)
-
-            # 构建计划摘要表格
-            summary_table = "\n".join([
-                "| 项目 | 内容 |",
-                "| --- | --- |",
-                f"| 计划名称 | {plan.name} |",
-                f"| 计划ID | {plan.id} |",
-                f"| 步骤数量 | {len(plan.steps)} |",
-                f"| 并行执行 | {'是' if parallel_execution else '否'} |",
-                f"| 失败停止 | {'是' if stop_on_failure else '否'} |",
-            ])
-
-            # 组合完整消息
-            full_message = f"✅ 已创建任务计划「{name}」\n\n**计划概览：**\n{summary_table}\n\n**步骤详情：**\n{step_table}"
-
-            return {
-                "success": True,
-                "plan_id": plan.id,
-                "name": plan.name,
-                "steps_count": len(plan.steps),
-                "steps_table": step_table,
-                "summary_table": summary_table,
-                "message": full_message,
-            }
-        except Exception as e:
-            return {"success": False, "message": f"创建计划失败: {str(e)}"}
 
     def _tool_analyze_task_history(
         self,

@@ -286,64 +286,6 @@ AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "create_task_plan",
-            "description": "创建包含多个步骤的任务计划（工作流）。当用户需要执行复杂的多步骤任务时调用。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "计划名称，如'购物流程'、'批量发消息'"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "计划的整体描述"
-                    },
-                    "steps": {
-                        "type": "array",
-                        "description": "任务步骤列表",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "description": {
-                                    "type": "string",
-                                    "description": "步骤的任务描述（给执行AI的指令）"
-                                },
-                                "device_ids": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "执行此步骤的设备ID列表"
-                                },
-                                "depends_on": {
-                                    "type": "array",
-                                    "items": {"type": "integer"},
-                                    "description": "依赖的步骤索引（从0开始）"
-                                },
-                                "condition": {
-                                    "type": "string",
-                                    "enum": ["always", "on_success", "on_failure"],
-                                    "description": "执行条件：always=总是执行, on_success=前置步骤成功时执行, on_failure=前置步骤失败时执行"
-                                }
-                            },
-                            "required": ["description"]
-                        }
-                    },
-                    "parallel_execution": {
-                        "type": "boolean",
-                        "description": "是否并行执行无依赖的步骤，默认false"
-                    },
-                    "stop_on_failure": {
-                        "type": "boolean",
-                        "description": "某步骤失败时是否停止整个计划，默认true"
-                    }
-                },
-                "required": ["name", "steps"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "analyze_task_history",
             "description": "分析历史任务执行情况，识别问题模式并给出改进建议。当用户想了解任务执行情况或需要优化时调用。",
             "parameters": {
@@ -393,7 +335,7 @@ AVAILABLE_TOOLS = [
 class AssistantPlanner:
     """封装对话式规划，支持 Tool Calling，维护历史并输出结构化计划"""
 
-    def __init__(self, api_base: str, api_key: str, model: str, require_confirmation: bool = True):
+    def __init__(self, api_base: str, api_key: str, model: str, require_confirmation: bool = False):
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
@@ -402,72 +344,49 @@ class AssistantPlanner:
         self.enable_tools = True
         self.require_confirmation = require_confirmation
 
-        self.system_prompt = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
+        self.system_prompt = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，生成操作指令并调用工具执行。
 
-## 重要概念（必须理解）
-- **用户**：与你对话的人，用自然语言描述需求（如"帮我发个微信"）
-- **执行AI（PhoneAgent）**：另一个AI，在手机上执行操作。它只能理解具体的操作指令
-- **你的核心工作**：将用户的口语化需求，转换成执行AI能理解的操作指令
+## 核心概念
+- **用户**：与你对话的人
+- **执行AI**：在手机上执行操作的AI，接收你生成的指令
+- **你的职责**：将用户需求转换为具体操作指令，并调用工具执行
 
-## 任务描述转换（最重要！）
-你必须将用户的自然语言转换成面向手机操作的指令：
+## 可用工具
+1. **execute_task**: 立即执行任务（最常用）
+2. **schedule_task**: 创建定时/重复任务
+3. **list_devices**: 查看可用设备
+4. **get_task_status**: 查询任务执行状态
 
-### 转换示例
-| 用户说 | 你应该生成的 task_description |
-|--------|------------------------------|
-| "帮我给张三发个微信说明天开会" | "打开微信，搜索联系人'张三'，发送消息：明天开会" |
-| "我想在淘宝买个耳机" | "打开淘宝，搜索'蓝牙耳机'，按销量排序，浏览商品" |
-| "看看抖音有什么好玩的" | "打开抖音，浏览推荐页面视频" |
-| "帮我点个外卖，肯德基的" | "打开美团外卖，搜索'肯德基'，进入店铺浏览菜单" |
-| "打开微信看看有没有新消息" | "打开微信，查看消息列表" |
+## 任务指令格式（重要！）
+task_description 必须是具体的操作指令：
+- ✅ "打开微信，搜索联系人'张三'，发送消息：明天开会"
+- ✅ "打开抖音，浏览推荐页面，连续观看60个视频"
+- ✅ "打开淘宝，搜索'蓝牙耳机'，浏览商品"
+- ❌ "帮用户发微信"（包含"帮用户"）
+- ❌ "完成购物任务"（没有具体步骤）
 
-### task_description 格式要求
-1. **以动词开头**：打开、搜索、点击、输入、发送、浏览等
-2. **包含具体参数**：App名称、搜索词、联系人、消息内容等
-3. **按操作顺序描述**：用逗号分隔每个步骤
-4. **不要包含**："帮你"、"请"、"用户想要"、"我要"等口语词汇
-5. **不要描述意图**：不写"完成发消息任务"，要写具体操作步骤
+## 时间类任务处理（非常重要！）
 
-### ❌ 错误的 task_description
-- "帮用户打开微信发消息"（包含"帮用户"）
-- "用户想要购物"（描述意图而非操作）
-- "请在手机上操作"（太模糊）
-- "完成任务"（没有具体步骤）
+当用户说"刷10分钟视频"、"浏览半小时"等包含时间的任务时：
+1. 将时间转换为具体操作次数（每10秒一次操作）
+2. 修改任务描述为具体次数
 
-## 你的能力（工具）
-1. **execute_task**: 立即执行任务
-2. **list_devices**: 查看可用设备
-3. **query_knowledge_base**: 查询知识库获取操作参考
-4. **schedule_task**: 创建定时/重复任务
-5. **get_task_status**: 查询任务执行状态
-6. **create_task_plan**: 创建多步骤任务计划（工作流）
-7. **analyze_task_history**: 分析历史执行情况
-8. **get_execution_summary**: 获取执行统计报告
+**转换公式**：操作次数 = 时间（秒）/ 10
 
-## 多步骤任务计划
-当用户需要执行复杂任务时（如"完整购物流程"），使用 create_task_plan：
-- 将复杂任务拆分为多个步骤
-- 每个步骤的 description 都要是具体的操作指令
-- 设置步骤依赖关系
+**转换示例**：
+- "刷10分钟视频" → "打开抖音，连续浏览约60个视频，每个视频观看约10秒后滑动切换"
+- "浏览5分钟朋友圈" → "打开微信朋友圈，连续浏览约30条内容，每条浏览约10秒后滑动"
+- "逛20分钟淘宝" → "打开淘宝，连续浏览约80个商品，每个商品浏览约15秒"
 
-## 对话流程
-1. 理解用户需求，必要时追问具体信息（如"发给谁？内容是什么？"）
-2. 信息充足后，先简要说明你理解的任务和将要执行的操作
-3. 调用工具执行时，先用口语向用户解释你在做什么
+## 工作流程
+1. 理解用户需求，必要时追问（"发给谁？""什么内容？"）
+2. **收集齐信息后，立即调用 execute_task 执行**，不要只是描述计划
+3. 告诉用户任务已下发，等待执行结果
 
-## 回复格式要求（非常重要！）
-**每次调用工具前，必须先用简短的口语告诉用户你在做什么。**
-
-示例：
-- 用户说"帮我打开微信"
-- 你应该回复：「好的，我来帮你打开微信。」然后调用 execute_task
-- 不要只调用工具不说话！
-
-## 对话风格
-- 简洁、专业、友好
-- 主动追问缺失的关键信息
-- 使用与用户相同的语言
-- **每次执行操作前都要口语说明你在做什么**"""
+## 回复要求
+- 简洁友好，使用与用户相同的语言
+- 调用工具前简短说明你在做什么
+- **收到用户确认后必须立即调用工具执行，不要只是口头描述**"""
 
         self.system_prompt_no_tools = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
 
