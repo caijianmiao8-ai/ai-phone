@@ -59,7 +59,13 @@ class SchedulerManager:
                 for item in data:
                     job = JobSpec(**item)
                     if not job.next_run:
-                        job.next_run = self._compute_next_run(job.rule)
+                        # 一次性任务已执行过（有 last_run）则不重新调度
+                        rule_type = (job.rule.get("type") or "").lower()
+                        if rule_type == "once" and job.last_run:
+                            # 已执行的一次性任务保持禁用状态
+                            job.enabled = False
+                        else:
+                            job.next_run = self._compute_next_run(job.rule)
                     self.jobs[job.id] = job
         except FileNotFoundError:
             return
@@ -203,6 +209,9 @@ class SchedulerManager:
                 job.last_status = prefix + (message or "已触发执行")
             # 执行后重新调度，一次性任务会返回 None
             job.next_run = self._compute_next_run(job.rule, is_reschedule=True)
+            # 一次性任务执行后自动禁用，防止程序重启后重复执行
+            if job.next_run is None:
+                job.enabled = False
             self._save_jobs()
 
     def shutdown(self):
