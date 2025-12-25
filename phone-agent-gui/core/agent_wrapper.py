@@ -41,9 +41,44 @@ def parse_duration_from_task(task: str) -> int:
     - "浏览10分钟视频"
     - "刷半小时视频"
 
+    排除的格式（表示步骤间隔而非总时长）：
+    - "每10秒" / "每隔10秒"
+    - "约10秒后" / "等10秒"
+    - "观看约10秒" / "浏览10秒后"
+    - "相当于X分钟"（已预处理的任务）
+
     Returns:
         时间限制（秒），0 表示未识别到时间
     """
+    # 检测已预处理的任务特征，直接返回0
+    # 这些模式表明任务已经被 preprocess_time_task 处理过
+    preprocessed_patterns = [
+        r'相当于\d+',           # "相当于10分钟"
+        r'连续浏览约\d+个',      # "连续浏览约60个视频"
+        r'约\d+次操作',          # "约60次操作"
+        r'完成约\d+次',          # "完成约60次切换"
+    ]
+    for p in preprocessed_patterns:
+        if re.search(p, task):
+            return 0
+
+    # 排除表示步骤间隔的模式
+    # 需要从任务中移除这些描述，避免误匹配
+    interval_patterns = [
+        r'每[隔]?\s*\d+(?:\.\d+)?\s*秒',           # "每10秒", "每隔10秒"
+        r'每[隔]?\s*[一二三四五六七八九十两半]+\s*秒',
+        r'[约等待]\s*\d+(?:\.\d+)?\s*秒[后再]',     # "约10秒后", "等10秒后"
+        r'[约等待]\s*[一二三四五六七八九十两半]+\s*秒[后再]',
+        r'观看[约]?\s*\d+(?:\.\d+)?\s*秒',         # "观看约10秒"
+        r'浏览[约]?\s*\d+(?:\.\d+)?\s*秒',         # "浏览约10秒"
+        r'\d+(?:\.\d+)?\s*秒后[切滑换]',           # "10秒后切换"
+    ]
+
+    # 创建一个临时任务字符串，移除步骤间隔描述
+    cleaned_task = task
+    for p in interval_patterns:
+        cleaned_task = re.sub(p, '', cleaned_task)
+
     # 中文数字转阿拉伯数字
     cn_num_map = {
         '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
@@ -80,13 +115,14 @@ def parse_duration_from_task(task: str) -> int:
         # 小时
         (r'(\d+(?:\.\d+)?)\s*(?:个)?小时', 3600),
         (r'([一二三四五六七八九十两半]+)\s*(?:个)?小时', 3600),
-        # 秒
+        # 秒（只匹配总时长模式，不匹配步骤间隔）
         (r'(\d+(?:\.\d+)?)\s*秒', 1),
         (r'([一二三四五六七八九十两半]+)\s*秒', 1),
     ]
 
+    # 使用清理后的任务字符串进行匹配
     for pattern, multiplier in patterns:
-        match = re.search(pattern, task)
+        match = re.search(pattern, cleaned_task)
         if match:
             num_str = match.group(1)
             try:

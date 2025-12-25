@@ -77,6 +77,20 @@ def preprocess_time_task(task: str, default_step_interval: int = 10) -> Tuple[st
     """
     import re
 
+    # 快速检测：如果任务已经包含预处理特征，直接返回原任务
+    # 避免重复处理已经转换过的任务（如 AI 助手已经转换的）
+    already_preprocessed_markers = [
+        r'连续浏览约\d+个',    # "连续浏览约60个视频"
+        r'相当于\d+',          # "(相当于10分钟)"
+        r'约\d+次操作',        # "约60次操作"
+        r'完成约\d+次',        # "完成约60次切换"
+        r'约\d+个视频',        # "约60个视频"
+        r'约\d+条内容',        # "约60条内容"
+    ]
+    for marker in already_preprocessed_markers:
+        if re.search(marker, task):
+            return task, 0, 0
+
     duration_seconds = parse_duration_from_task(task)
     if duration_seconds <= 0:
         return task, 0, 0
