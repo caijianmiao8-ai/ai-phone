@@ -618,7 +618,7 @@ class AppState:
         return "\n".join(logs) if logs else "暂无日志"
 
     def store_task_analysis(self, record_id: str, analysis: TaskAnalysisResult):
-        """存储任务分析结果"""
+        """存储任务分析结果，并同步更新任务历史记录"""
         with self.state_lock:
             self.task_analysis_results[record_id] = analysis
             # 限制缓存大小，保留最近100条
@@ -626,6 +626,16 @@ class AppState:
                 oldest_keys = list(self.task_analysis_results.keys())[:-100]
                 for key in oldest_keys:
                     del self.task_analysis_results[key]
+
+        # 如果AI分析判定失败，更新任务历史记录的成功状态
+        # 这确保 analyze_task_history 工具能获取正确的成功率
+        if not analysis.success_judgment:
+            record = self.task_history.get_record(record_id)
+            if record and record.success:
+                # AI分析判定失败，但原记录标记为成功，需要更正
+                record.success = False
+                record.error_message = f"AI分析判定失败: {analysis.summary}"
+                self.task_history.update_record(record)
 
     def get_task_analysis(self, record_id: str) -> Optional[TaskAnalysisResult]:
         """获取任务分析结果"""

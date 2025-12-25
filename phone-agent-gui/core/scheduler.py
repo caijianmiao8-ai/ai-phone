@@ -185,6 +185,15 @@ class SchedulerManager:
                         continue
                     if next_dt <= now:
                         to_run.append(job)
+                        # 立即更新 next_run 防止重复触发
+                        # 一次性任务设为 None，其他任务计算下次时间
+                        job.next_run = self._compute_next_run(job.rule, is_reschedule=True)
+                        if job.next_run is None:
+                            # 一次性任务：标记为已触发，等待执行完成后禁用
+                            pass
+                # 保存更新后的 next_run
+                if to_run:
+                    self._save_jobs()
 
             for job in to_run:
                 threading.Thread(target=self._execute_job, args=(job,), daemon=True).start()
@@ -207,10 +216,10 @@ class SchedulerManager:
                 job.last_status = message
             else:
                 job.last_status = prefix + (message or "已触发执行")
-            # 执行后重新调度，一次性任务会返回 None
-            job.next_run = self._compute_next_run(job.rule, is_reschedule=True)
+            # next_run 已在 _run_loop 中更新，这里只需处理一次性任务的禁用
             # 一次性任务执行后自动禁用，防止程序重启后重复执行
-            if job.next_run is None:
+            rule_type = (job.rule.get("type") or "").lower()
+            if rule_type == "once":
                 job.enabled = False
             self._save_jobs()
 
