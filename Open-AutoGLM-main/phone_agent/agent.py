@@ -73,8 +73,16 @@ class ExecutionContext:
         elapsed = self.get_elapsed_seconds()
         remaining = self.get_remaining_seconds()
 
+        # 提取原始任务描述（去除知识库增强部分）
+        task_desc = self.task
+        if "=====" in task_desc:
+            task_desc = task_desc.split("=====")[0].strip()
+        # 限制长度，避免上下文过大
+        if len(task_desc) > 100:
+            task_desc = task_desc[:100] + "..."
+
         hints = []
-        hints.append(f"【当前任务】{self.task}")
+        hints.append(f"【当前任务】{task_desc}")
         hints.append(f"【执行进度】第 {self.step_count} 步 / 最多 {self.max_steps} 步")
 
         if self.max_duration_seconds > 0:
