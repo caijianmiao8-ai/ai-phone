@@ -346,6 +346,29 @@ def parse_action(response: str) -> dict[str, Any]:
     try:
         response = response.strip()
 
+        # Clean up markdown code block formatting that some models add
+        # Remove ```python or ``` at the start
+        if response.startswith("```"):
+            lines = response.split("\n")
+            # Remove first line if it's just ```python or ```
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            # Remove last line if it's just ```
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response = "\n".join(lines).strip()
+
+        # Remove trailing ``` if present (inline format)
+        if response.endswith("```"):
+            response = response[:-3].strip()
+
+        # Remove literal \n``` at the end (some models output this)
+        while response.endswith("\\n```") or response.endswith("\\n"):
+            if response.endswith("\\n```"):
+                response = response[:-5].strip()
+            elif response.endswith("\\n"):
+                response = response[:-2].strip()
+
         # Handle empty response - AI model returned nothing
         if not response:
             raise ValueError("AI model returned empty response, waiting for retry...")
