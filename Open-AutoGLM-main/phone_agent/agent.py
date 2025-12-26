@@ -301,9 +301,20 @@ class PhoneAgent:
         # Parse action from response
         try:
             action = parse_action(response.action)
-        except ValueError:
+        except ValueError as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
+            # Handle empty response specially - allow retry instead of immediate finish
+            if not response.action or not response.action.strip():
+                print("⚠️ AI model returned empty response, will retry on next step...")
+                # Return a non-fatal result that allows the loop to continue
+                return StepResult(
+                    success=True,
+                    finished=False,
+                    action=do(action="Wait", duration="1 seconds"),
+                    thinking=response.thinking or "Empty response, waiting to retry...",
+                    message="Waiting for AI response...",
+                )
             action = finish(message=response.action)
 
         if self.agent_config.verbose:

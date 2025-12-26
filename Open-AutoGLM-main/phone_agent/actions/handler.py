@@ -345,6 +345,11 @@ def parse_action(response: str) -> dict[str, Any]:
     print(f"Parsing action: {response}")
     try:
         response = response.strip()
+
+        # Handle empty response - AI model returned nothing
+        if not response:
+            raise ValueError("AI model returned empty response, waiting for retry...")
+
         if response.startswith('do(action="Type"') or response.startswith(
             'do(action="Type_Name"'
         ):
