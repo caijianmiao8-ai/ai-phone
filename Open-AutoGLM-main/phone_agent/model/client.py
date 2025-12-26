@@ -81,7 +81,15 @@ class ModelClient:
 
         raw_content = ""
         buffer = ""  # Buffer to hold content that might be part of a marker
+        # Standard markers + direct action names
         action_markers = ["finish(message=", "do(action="]
+        # Add direct action patterns: Wait(, Tap(, Swipe(, etc.
+        direct_action_patterns = [
+            "Wait(", "Tap(", "Swipe(", "Type(", "Type_Name(",
+            "Launch(", "Back(", "Home(", "Long Press(",
+            "Double Tap(", "Take_over(", "Note(", "Call_API(", "Interact("
+        ]
+        all_markers = action_markers + direct_action_patterns
         in_action_phase = False  # Track if we've entered the action phase
         first_token_received = False
 
@@ -105,7 +113,7 @@ class ModelClient:
 
                 # Check if any marker is fully present in buffer
                 marker_found = False
-                for marker in action_markers:
+                for marker in all_markers:
                     if marker in buffer:
                         # Marker found, print everything before it
                         thinking_part = buffer.split(marker, 1)[0]
@@ -126,7 +134,7 @@ class ModelClient:
                 # Check if buffer ends with a prefix of any marker
                 # If so, don't print yet (wait for more content)
                 is_potential_marker = False
-                for marker in action_markers:
+                for marker in all_markers:
                     for i in range(1, len(marker)):
                         if buffer.endswith(marker[:i]):
                             is_potential_marker = True
@@ -191,12 +199,21 @@ class ModelClient:
         Returns:
             Tuple of (thinking, action).
         """
+        import re
+
         def clean_tags(text: str) -> str:
             """Remove XML tags from text."""
             text = text.replace("<think>", "").replace("</think>", "")
             text = text.replace("<answer>", "").replace("</answer>", "")
             text = text.replace("<action>", "").replace("</action>", "")
             return text.strip()
+
+        # All supported action names that models might output directly
+        DIRECT_ACTION_NAMES = [
+            "Wait", "Tap", "Swipe", "Type", "Type_Name", "Launch",
+            "Back", "Home", "Long Press", "Double Tap", "Take_over",
+            "Note", "Call_API", "Interact"
+        ]
 
         def extract_function_call(text: str, func_prefix: str) -> str:
             """Extract only the function call, ignoring any text after closing paren.
@@ -234,6 +251,66 @@ class ModelClient:
                 # Fallback: return cleaned text
                 return func_prefix + text
 
+        def find_direct_action_call(text: str) -> tuple[str, str, int] | None:
+            """Find direct action calls like Wait(...), Tap(...) in text.
+
+            Returns: (action_name, full_call, start_position) or None
+            """
+            # Build pattern to match direct action calls
+            # Match: ActionName( or ActionName ( with optional space
+            for action_name in DIRECT_ACTION_NAMES:
+                # Pattern: action_name followed by ( with optional whitespace
+                pattern = rf'\b{re.escape(action_name)}\s*\('
+                match = re.search(pattern, text)
+                if match:
+                    start_pos = match.start()
+                    # Extract the full function call starting from the match
+                    remaining = text[match.end():]  # Text after opening paren
+
+                    # Find matching closing paren
+                    paren_count = 1
+                    end_pos = 0
+                    in_string = False
+                    string_char = None
+
+                    for i, char in enumerate(remaining):
+                        if in_string:
+                            if char == string_char and (i == 0 or remaining[i-1] != '\\'):
+                                in_string = False
+                        elif char in ('"', "'"):
+                            in_string = True
+                            string_char = char
+                        elif char == '(':
+                            paren_count += 1
+                        elif char == ')':
+                            paren_count -= 1
+                            if paren_count == 0:
+                                end_pos = i + 1
+                                break
+
+                    if end_pos > 0:
+                        # Extract arguments part (inside parentheses)
+                        args_part = remaining[:end_pos - 1]  # Exclude closing paren
+                        full_call = f'{action_name}({args_part})'
+                        return action_name, full_call, start_pos
+
+            return None
+
+        def convert_direct_action_to_do(action_name: str, full_call: str) -> str:
+            """Convert direct action call to do(action=...) format.
+
+            Example: Wait(duration="10 seconds") -> do(action="Wait", duration="10 seconds")
+            """
+            # Extract arguments from the call
+            # full_call format: ActionName(arg1=val1, arg2=val2)
+            open_paren = full_call.index('(')
+            args_part = full_call[open_paren + 1:-1]  # Remove ActionName( and )
+
+            if args_part.strip():
+                return f'do(action="{action_name}", {args_part})'
+            else:
+                return f'do(action="{action_name}")'
+
         # Rule 1: Check for finish(message=
         if "finish(message=" in content:
             parts = content.split("finish(message=", 1)
@@ -248,7 +325,17 @@ class ModelClient:
             action = extract_function_call(parts[1], "do(action=")
             return thinking, action
 
-        # Rule 3: Fallback to legacy XML tag parsing
+        # Rule 3: Check for direct action calls like Wait(...), Tap(...), etc.
+        # This handles models that don't use the do(action=...) wrapper
+        direct_result = find_direct_action_call(content)
+        if direct_result:
+            action_name, full_call, start_pos = direct_result
+            thinking = clean_tags(content[:start_pos])
+            # Convert to standard do(action=...) format
+            action = convert_direct_action_to_do(action_name, full_call)
+            return thinking, action
+
+        # Rule 4: Fallback to legacy XML tag parsing
         if "<answer>" in content:
             parts = content.split("<answer>", 1)
             thinking = clean_tags(parts[0])
@@ -262,9 +349,15 @@ class ModelClient:
                 action = extract_function_call(
                     action.split("finish(message=", 1)[1], "finish(message="
                 )
+            else:
+                # Check for direct action calls in the answer part
+                direct_result = find_direct_action_call(action)
+                if direct_result:
+                    action_name, full_call, _ = direct_result
+                    action = convert_direct_action_to_do(action_name, full_call)
             return thinking, action
 
-        # Rule 4: No markers found, return content as action
+        # Rule 5: No markers found, return content as action
         return "", content
 
 
