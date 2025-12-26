@@ -209,7 +209,11 @@ class ModelClient:
         if "<answer>" in content:
             parts = content.split("<answer>", 1)
             thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
-            action = parts[1].replace("</answer>", "").strip()
+            # Remove ALL <answer> and </answer> tags (some models output repeated tags)
+            action = parts[1]
+            action = action.replace("<answer>", "").replace("</answer>", "")
+            action = action.replace("<think>", "").replace("</think>", "")
+            action = action.strip()
             return thinking, action
 
         # Rule 4: No markers found, return content as action

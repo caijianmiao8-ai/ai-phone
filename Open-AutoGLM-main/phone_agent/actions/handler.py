@@ -347,11 +347,19 @@ def parse_action(response: str) -> dict[str, Any]:
         response = response.strip()
 
         # Clean up XML/HTML tags that some models add
-        # Remove </answer>, </action>, </response> etc. at the end
         import re
-        response = re.sub(r'</\w+>\s*$', '', response).strip()
-        # Remove <answer>, <action>, <response> etc. at the start
-        response = re.sub(r'^<\w+>\s*', '', response).strip()
+
+        # Remove ALL <answer>, <think>, etc. tags (not just one)
+        # Some models output repeated tags like <answer><answer><answer>...
+        response = re.sub(r'<answer>\s*', '', response)
+        response = re.sub(r'</answer>\s*', '', response)
+        response = re.sub(r'<think>\s*', '', response)
+        response = re.sub(r'</think>\s*', '', response)
+        response = re.sub(r'<action>\s*', '', response)
+        response = re.sub(r'</action>\s*', '', response)
+        response = re.sub(r'<response>\s*', '', response)
+        response = re.sub(r'</response>\s*', '', response)
+        response = response.strip()
 
         # Clean up markdown code block formatting that some models add
         # Remove ```python or ``` at the start
@@ -369,15 +377,12 @@ def parse_action(response: str) -> dict[str, Any]:
         if response.endswith("```"):
             response = response[:-3].strip()
 
-        # Remove literal \n``` or \n```</answer> at the end (some models output this)
+        # Remove literal \n``` at the end (some models output this)
         # Keep cleaning until no more patterns match
         cleanup_patterns = [
-            r'\\n```</\w+>$',   # \n```</answer>
             r'\\n```$',         # \n```
-            r'\\n</\w+>$',      # \n</answer>
             r'\\n$',            # \n
-            r'```</\w+>$',      # ```</answer>
-            r'</\w+>$',         # </answer>
+            r'```$',            # trailing ```
         ]
         changed = True
         while changed:
