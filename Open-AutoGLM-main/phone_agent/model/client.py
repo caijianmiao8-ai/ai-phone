@@ -191,39 +191,77 @@ class ModelClient:
         Returns:
             Tuple of (thinking, action).
         """
-        def clean_thinking(text: str) -> str:
-            """Remove XML tags from thinking text."""
+        def clean_tags(text: str) -> str:
+            """Remove XML tags from text."""
             text = text.replace("<think>", "").replace("</think>", "")
             text = text.replace("<answer>", "").replace("</answer>", "")
             text = text.replace("<action>", "").replace("</action>", "")
             return text.strip()
 
-        def clean_action(text: str) -> str:
-            """Remove XML tags from action text."""
-            text = text.replace("<answer>", "").replace("</answer>", "")
-            text = text.replace("<think>", "").replace("</think>", "")
-            text = text.replace("<action>", "").replace("</action>", "")
-            return text.strip()
+        def extract_function_call(text: str, func_prefix: str) -> str:
+            """Extract only the function call, ignoring any text after closing paren.
+
+            For input like: '"Wait", duration="10 seconds")</answer>\n中文内容...'
+            Returns: '"Wait", duration="10 seconds")'
+            """
+            # First clean XML tags
+            text = clean_tags(text)
+
+            # Find the matching closing parenthesis
+            paren_count = 1  # We already have the opening paren from func_prefix
+            end_pos = 0
+            in_string = False
+            string_char = None
+
+            for i, char in enumerate(text):
+                if in_string:
+                    if char == string_char and (i == 0 or text[i-1] != '\\'):
+                        in_string = False
+                elif char in ('"', "'"):
+                    in_string = True
+                    string_char = char
+                elif char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+                    if paren_count == 0:
+                        end_pos = i + 1
+                        break
+
+            if end_pos > 0:
+                return func_prefix + text[:end_pos]
+            else:
+                # Fallback: return cleaned text
+                return func_prefix + text
 
         # Rule 1: Check for finish(message=
         if "finish(message=" in content:
             parts = content.split("finish(message=", 1)
-            thinking = clean_thinking(parts[0])
-            action = "finish(message=" + clean_action(parts[1])
+            thinking = clean_tags(parts[0])
+            action = extract_function_call(parts[1], "finish(message=")
             return thinking, action
 
         # Rule 2: Check for do(action=
         if "do(action=" in content:
             parts = content.split("do(action=", 1)
-            thinking = clean_thinking(parts[0])
-            action = "do(action=" + clean_action(parts[1])
+            thinking = clean_tags(parts[0])
+            action = extract_function_call(parts[1], "do(action=")
             return thinking, action
 
         # Rule 3: Fallback to legacy XML tag parsing
         if "<answer>" in content:
             parts = content.split("<answer>", 1)
-            thinking = clean_thinking(parts[0])
-            action = clean_action(parts[1])
+            thinking = clean_tags(parts[0])
+            action = clean_tags(parts[1])
+            # Try to extract function call from action
+            if "do(action=" in action:
+                action = extract_function_call(
+                    action.split("do(action=", 1)[1], "do(action="
+                )
+            elif "finish(message=" in action:
+                action = extract_function_call(
+                    action.split("finish(message=", 1)[1], "finish(message="
+                )
             return thinking, action
 
         # Rule 4: No markers found, return content as action
