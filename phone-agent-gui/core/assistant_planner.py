@@ -496,7 +496,7 @@ class AssistantPlanner:
         weekday = weekday_names[now.weekday()]
         return (
             f"【当前时间】{now.strftime('%Y年%m月%d日')} {weekday} {now.strftime('%H:%M')}\n"
-            f"用户说"今天"指的是{now.strftime('%Y-%m-%d')}，"明天"指的是{(now + timedelta(days=1)).strftime('%Y-%m-%d')}。\n"
+            f"用户说'今天'指的是{now.strftime('%Y-%m-%d')}，'明天'指的是{(now + timedelta(days=1)).strftime('%Y-%m-%d')}。\n"
             f"设置定时任务时，请使用正确的日期。"
         )
 
