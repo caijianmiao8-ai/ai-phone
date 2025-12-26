@@ -98,10 +98,19 @@ hiddenimports += [
     'core.assistant_planner',
     'core.scheduler',
     'core.task_analyzer',
-    'core.knowledge_manager',
+    'core.device_manager',
+    'core.adb_helper',
+    'core.device_registry',
+    'core.file_transfer',
+    'core.task_history',
+    'core.task_plan',
+    'core.task_queue',
     # ui 模块
     'ui',
     'ui.app',
+    # knowledge_base 模块
+    'knowledge_base',
+    'knowledge_base.manager',
 ]
 
 a = Analysis(
