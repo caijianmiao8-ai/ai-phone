@@ -179,6 +179,7 @@ class AgentWrapper:
         use_knowledge_base: bool = True,
         max_duration_seconds: int = 0,  # 新增：时间限制（秒），0表示不限制
         auto_detect_duration: bool = True,  # 新增：是否从任务描述中自动检测时间
+        takeover_callback: Optional[Callable[[str], None]] = None,  # 用户接管回调
     ):
         self.api_base_url = api_base_url
         self.api_key = (api_key or "").strip()
@@ -194,6 +195,7 @@ class AgentWrapper:
         self.use_knowledge_base = use_knowledge_base
         self.max_duration_seconds = max_duration_seconds
         self.auto_detect_duration = auto_detect_duration
+        self.takeover_callback = takeover_callback
 
         self._agent = None
         self._is_running = False
@@ -241,6 +243,7 @@ class AgentWrapper:
             self._agent = PhoneAgent(
                 model_config=model_config,
                 agent_config=agent_config,
+                takeover_callback=self.takeover_callback,
             )
 
             return True

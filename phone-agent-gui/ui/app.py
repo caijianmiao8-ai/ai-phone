@@ -147,6 +147,10 @@ class DeviceTaskState:
     status: str = "⏸️ 空闲"
     screenshot: Optional[bytes] = None
     agent: Optional[AgentWrapper] = None
+    # 用户接管状态
+    takeover_event: Optional[threading.Event] = None
+    takeover_message: str = ""
+    waiting_for_takeover: bool = False
 
 
 class AppState:
@@ -599,6 +603,48 @@ class AppState:
         with self.state_lock:
             state = self.device_states[device_id]
             state.agent = agent
+
+    def request_takeover(self, device_id: str, message: str) -> None:
+        """
+        请求用户接管（阻塞调用，直到用户点击继续）
+        用于替代原来的 input() 阻塞方式
+        """
+        event = threading.Event()
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.takeover_event = event
+            state.takeover_message = message
+            state.waiting_for_takeover = True
+
+        self.add_device_log(device_id, f"⚠️ 需要用户操作: {message}")
+        self.set_device_status(device_id, "⏸️ 等待用户操作")
+
+        # 阻塞等待用户点击继续，最多等待5分钟
+        event.wait(timeout=300)
+
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.waiting_for_takeover = False
+            state.takeover_message = ""
+            state.takeover_event = None
+
+        self.add_device_log(device_id, "▶️ 用户确认继续执行")
+        self.set_device_status(device_id, "🚀 执行中")
+
+    def continue_takeover(self, device_id: str) -> str:
+        """用户点击继续按钮时调用"""
+        with self.state_lock:
+            state = self.device_states[device_id]
+            if state.takeover_event:
+                state.takeover_event.set()
+                return "已继续执行"
+        return "当前无需操作"
+
+    def get_takeover_status(self, device_id: str) -> Tuple[bool, str]:
+        """获取设备的接管状态"""
+        with self.state_lock:
+            state = self.device_states[device_id]
+            return state.waiting_for_takeover, state.takeover_message
 
     def refresh_assistant_planner(self):
         """同步助手配置"""
@@ -1438,6 +1484,10 @@ def execute_task_for_device(
         max_steps=effective_max_steps,
     )
 
+    # 创建接管回调（用于替代CMD的input阻塞）
+    def takeover_callback(msg: str, did: str = device_id):
+        app_state.request_takeover(did, msg)
+
     agent = AgentWrapper(
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
@@ -1451,6 +1501,7 @@ def execute_task_for_device(
         verbose=settings.verbose,
         knowledge_manager=app_state.knowledge_manager if use_knowledge else None,
         use_knowledge_base=use_knowledge,
+        takeover_callback=takeover_callback,
     )
 
     # 日志回调：同时记录到设备状态和历史记录
@@ -1635,10 +1686,38 @@ def _render_device_status_board() -> str:
     for device_id, state in states.items():
         if not state.logs and state.status == "⏸️ 空闲" and not state.screenshot:
             continue
-        lines.append(f"- **{device_id}**: {state.status}")
+        status_line = f"- **{device_id}**: {state.status}"
+        # 如果正在等待用户操作，显示提示消息
+        if state.waiting_for_takeover and state.takeover_message:
+            status_line += f"\n  > ⚠️ {state.takeover_message}"
+        lines.append(status_line)
     if not lines:
         return "暂无设备状态"
     return "\n".join(lines)
+
+
+def _get_devices_waiting_takeover() -> List[str]:
+    """获取所有等待用户操作的设备"""
+    states = app_state.snapshot_states()
+    waiting = []
+    for device_id, state in states.items():
+        if state.waiting_for_takeover:
+            waiting.append(device_id)
+    return waiting
+
+
+def continue_all_takeovers() -> str:
+    """继续所有等待中的设备"""
+    waiting = _get_devices_waiting_takeover()
+    if not waiting:
+        return "当前没有设备等待操作"
+
+    results = []
+    for device_id in waiting:
+        result = app_state.continue_takeover(device_id)
+        results.append(f"{device_id}: {result}")
+
+    return "已继续执行: " + ", ".join(waiting)
 
 
 def _render_device_logs() -> str:
@@ -2617,6 +2696,7 @@ def create_app() -> gr.Blocks:
                         with gr.Row():
                             run_btn = gr.Button("▶️ 开始执行", variant="primary", scale=2)
                             stop_btn = gr.Button("⏹️ 停止", variant="stop", scale=1)
+                            continue_btn = gr.Button("▶️ 继续执行", variant="secondary", scale=1)
 
                         task_status = gr.Textbox(
                             label="状态",
@@ -2650,6 +2730,14 @@ def create_app() -> gr.Blocks:
 
                 stop_btn.click(
                     fn=stop_task,
+                    outputs=[task_status],
+                ).then(
+                    fn=refresh_task_panels,
+                    outputs=[log_area, device_status_board],
+                )
+
+                continue_btn.click(
+                    fn=continue_all_takeovers,
                     outputs=[task_status],
                 ).then(
                     fn=refresh_task_panels,
