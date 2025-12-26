@@ -219,13 +219,23 @@ class AppState:
         device_ids: List[str] = None,
         use_knowledge: bool = None,
     ) -> dict:
-        """工具：立即执行任务（支持多设备）"""
+        """工具：立即执行任务（支持多设备）
+
+        如果不传 device_id 或 device_ids，默认在所有在线设备上执行。
+        """
         if self.is_task_running:
             return {"success": False, "message": "已有任务在执行中，请等待完成"}
 
         target_list = [d for d in (device_ids or []) if d]
         if device_id and not target_list:
             target_list = [device_id]
+
+        # 如果没有指定设备，默认选择所有在线设备（不使用 current_device）
+        if not target_list:
+            online_devices = self.device_manager.scan_devices(include_saved_offline=False)
+            target_list = [d.device_id for d in online_devices if d.is_online]
+            if not target_list:
+                return {"success": False, "message": "没有在线设备，请先连接设备"}
 
         # 智能预处理时间任务
         original_task = task_description.strip()
