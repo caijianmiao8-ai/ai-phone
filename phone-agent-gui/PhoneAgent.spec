@@ -92,6 +92,16 @@ hiddenimports += [
     'phone_agent.actions.handler',
     'phone_agent.adb',
     'phone_agent.config',
+    # core 模块
+    'core',
+    'core.agent_wrapper',
+    'core.assistant_planner',
+    'core.scheduler',
+    'core.task_analyzer',
+    'core.knowledge_manager',
+    # ui 模块
+    'ui',
+    'ui.app',
 ]
 
 a = Analysis(
