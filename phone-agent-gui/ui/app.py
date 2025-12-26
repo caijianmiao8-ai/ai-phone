@@ -340,12 +340,9 @@ class AppState:
         device_ids: List[str] = None
     ) -> dict:
         """工具：创建定时任务"""
-        from core.scheduler import SchedulerManager
-
-        if not self.scheduler:
-            self.scheduler = SchedulerManager(
-                task_executor=lambda spec: self._run_scheduled_task(spec)
-            )
+        # 使用统一的调度器初始化，确保使用正确的 task_executor
+        # 不要在这里单独创建 SchedulerManager，否则会使用不同的执行器
+        scheduler = _ensure_scheduler()
 
         # 构建调度规则
         rule = {"type": schedule_type}
@@ -362,7 +359,7 @@ class AppState:
             devices = self.device_manager.scan_devices(include_saved_offline=False)
             targets = [d.device_id for d in devices if d.is_online]
 
-        job = self.scheduler.add_job({
+        job = scheduler.add_job({
             "description": task_description,
             "device_ids": targets,
             "rule": rule,
