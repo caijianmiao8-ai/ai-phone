@@ -191,29 +191,39 @@ class ModelClient:
         Returns:
             Tuple of (thinking, action).
         """
+        def clean_thinking(text: str) -> str:
+            """Remove XML tags from thinking text."""
+            text = text.replace("<think>", "").replace("</think>", "")
+            text = text.replace("<answer>", "").replace("</answer>", "")
+            text = text.replace("<action>", "").replace("</action>", "")
+            return text.strip()
+
+        def clean_action(text: str) -> str:
+            """Remove XML tags from action text."""
+            text = text.replace("<answer>", "").replace("</answer>", "")
+            text = text.replace("<think>", "").replace("</think>", "")
+            text = text.replace("<action>", "").replace("</action>", "")
+            return text.strip()
+
         # Rule 1: Check for finish(message=
         if "finish(message=" in content:
             parts = content.split("finish(message=", 1)
-            thinking = parts[0].strip()
-            action = "finish(message=" + parts[1]
+            thinking = clean_thinking(parts[0])
+            action = "finish(message=" + clean_action(parts[1])
             return thinking, action
 
         # Rule 2: Check for do(action=
         if "do(action=" in content:
             parts = content.split("do(action=", 1)
-            thinking = parts[0].strip()
-            action = "do(action=" + parts[1]
+            thinking = clean_thinking(parts[0])
+            action = "do(action=" + clean_action(parts[1])
             return thinking, action
 
         # Rule 3: Fallback to legacy XML tag parsing
         if "<answer>" in content:
             parts = content.split("<answer>", 1)
-            thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
-            # Remove ALL <answer> and </answer> tags (some models output repeated tags)
-            action = parts[1]
-            action = action.replace("<answer>", "").replace("</answer>", "")
-            action = action.replace("<think>", "").replace("</think>", "")
-            action = action.strip()
+            thinking = clean_thinking(parts[0])
+            action = clean_action(parts[1])
             return thinking, action
 
         # Rule 4: No markers found, return content as action
