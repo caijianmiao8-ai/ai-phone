@@ -35,6 +35,9 @@ SYSTEM_PROMPT = (
 ❌ Wait(duration="10 seconds")  -- 缺少do()包装
 ❌ 我需要等待。Wait(duration="10 seconds")  -- 缺少标签
 ❌ <answer>需要等待页面加载，执行Wait操作</answer>  -- 不是指令格式
+❌ <tool_call>...</tool_call>  -- 禁止使用tool_call标签
+❌ ```html ... ```  -- 禁止在answer中使用代码块
+❌ 只输出描述性文本不输出动作  -- 必须包含可执行的do()或finish()指令
 
 操作指令及其作用如下：
 - do(action="Launch", app="xxx")

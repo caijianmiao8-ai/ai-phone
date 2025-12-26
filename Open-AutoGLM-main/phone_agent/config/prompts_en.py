@@ -36,6 +36,9 @@ WRONG examples (NEVER do these):
 ❌ Wait(duration="10 seconds")  -- missing do() wrapper
 ❌ I need to wait. Wait(duration="10 seconds")  -- missing tags
 ❌ <answer>I will wait for the page to load</answer>  -- not an action code
+❌ <tool_call>...</tool_call>  -- NEVER use tool_call tags
+❌ ```html ... ```  -- NEVER use code blocks in answer
+❌ Only descriptive text without action  -- MUST include executable do() or finish()
 
 - **Tap**
   Perform a tap action on a specified screen area. The element is a list of 2 integers, representing the coordinates of the tap point.

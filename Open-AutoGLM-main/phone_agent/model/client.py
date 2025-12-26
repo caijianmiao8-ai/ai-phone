@@ -358,6 +358,29 @@ class ModelClient:
             return thinking, action
 
         # Rule 5: No markers found, return content as action
+        # But first, check if the content looks like it has no action at all
+        # (e.g., just descriptive text without any function call)
+        cleaned_content = clean_tags(content)
+        # Remove markdown code blocks
+        cleaned_content = re.sub(r'```\w*\n?', '', cleaned_content)
+        cleaned_content = re.sub(r'```', '', cleaned_content)
+        # Remove <tool_call> tags that some models output
+        cleaned_content = re.sub(r'</?tool_call>', '', cleaned_content)
+        cleaned_content = cleaned_content.strip()
+
+        # If the cleaned content doesn't contain any action-like patterns,
+        # return a default Wait action to let the system retry
+        has_action_pattern = any([
+            'do(' in cleaned_content,
+            'finish(' in cleaned_content,
+        ] + [f'{name}(' in cleaned_content for name in DIRECT_ACTION_NAMES])
+
+        if not has_action_pattern and cleaned_content:
+            # Model returned descriptive text without action
+            # Return the text as thinking and a Wait action to retry
+            print(f"⚠️ Model returned no action, will retry with Wait...")
+            return cleaned_content, 'do(action="Wait", duration="2 seconds")'
+
         return "", content
 
 
