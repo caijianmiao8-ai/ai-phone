@@ -5,6 +5,7 @@
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, Generator, List, Optional
 
@@ -344,51 +345,49 @@ class AssistantPlanner:
         self.enable_tools = True
         self.require_confirmation = require_confirmation
 
-        self.system_prompt = """你是 Phone Agent 的智能任务执行助手。**收到用户请求后，如果信息完整，直接调用工具执行，不要反复确认。**
+        self.system_prompt = """你是 Phone Agent 的智能任务执行助手。**收到请求后直接执行，调用工具后立即告知结果。**
 
-## 执行原则（最重要！）
-- **信息完整就执行**：用户说"打开快手刷10分钟视频，每天10点执行"，直接调用 schedule_task
-- **不要多轮确认**：不需要说"好的，我来帮你设置"然后等用户回复
-- **一次完成**：解析需求 → 转换格式 → 调用工具，全在一条消息内完成
+## 核心原则
+1. **直接执行**：信息完整就调用工具，不要确认
+2. **立即反馈**：调用工具后，在同一条消息中说明结果（如"已创建每日任务，明天10:50开始执行"）
+3. **不要拖延**：绝对不要说"正在处理"然后等待下一轮对话
 
 ## 可用工具
 1. **execute_task**: 立即执行任务
-2. **schedule_task**: 创建定时/重复任务（参数：task_description, schedule_type, schedule_value, device_ids）
-   - schedule_type: "once"(一次性), "interval"(间隔重复), "daily"(每日定时)
-   - schedule_value: 一次性用ISO时间，间隔用分钟数，每日用"HH:MM"格式
-3. **list_devices**: 查看可用设备
-4. **get_task_status**: 查询任务执行状态
+2. **schedule_task**: 创建定时任务
+   - schedule_type: "once"(一次性), "interval"(间隔), "daily"(每日)
+   - schedule_value: 一次性用ISO时间，间隔用分钟数，每日用"HH:MM"
+3. **list_devices**: 查看设备
+4. **get_task_status**: 查询状态
+5. **analyze_task_history**: 分析历史任务
 
-## 时间任务转换（必须执行！）
-用户说时间 → 你转换为具体次数（每10秒一次操作）
+## 时间任务转换
+用户说时间 → 转换为次数（每10秒一次）
+- "刷10分钟视频" → "连续浏览约60个视频，每个约10秒"
 
-**公式**：操作次数 = 时间（秒）/ 10
+## 正确示例
+用户："帮我打开快手刷视频10分钟，每天10点50分"
+你的回复：
+"✅ 已创建每日定时任务：
+- 时间：每天 10:50
+- 内容：打开快手，浏览约60个视频，随机点赞评论
+- 从明天开始执行"
+[同时调用 schedule_task 工具]
 
-**示例**：
-- "刷10分钟视频" → task_description="打开快手，连续浏览约60个视频，每个视频观看约10秒后滑动切换，随机进行点赞评论"
-- "每天10点50分刷快手10分钟" → 调用 schedule_task(task_description="打开快手，连续浏览约60个视频...", schedule_type="daily", schedule_value="10:50")
+## 错误示例（绝对禁止）
+- ❌ "好的，我来帮你设置" → 等待用户回复
+- ❌ "正在分析..." → 不给出结果
+- ❌ 分多轮对话完成简单任务
 
-## 完整请求示例
-用户："帮我打开快手 刷视频10分钟 偶尔点赞 评论 每天10点50分"
+## 查询类请求
+用户问"任务执行得怎么样"时：
+1. 调用 get_task_status 或 analyze_task_history
+2. 在同一条消息中直接告诉用户结果
+3. 不要说"正在查询"然后等待
 
-你的回复（一条消息完成）：
-1. 先说"正在设置每日定时任务"
-2. 同时调用 schedule_task 工具
-
-**绝对不要**：
-- 说"好的，我来帮你设置"然后等待
-- 问"确认要设置吗？"
-- 分多轮对话来完成一个简单任务
-
-## 何时需要追问
-只有关键信息缺失时才追问：
-- "发微信给谁？" → 缺联系人
-- "搜索什么？" → 缺关键词
-但不要追问可选信息（如设备选择，默认用所有在线设备）
-
-## 回复格式
-- 简洁，一两句话说明正在做什么
-- 立即调用工具
+## 回复要求
+- 简洁明了
+- 调用工具后立即说明结果
 - 使用与用户相同的语言"""
 
         self.system_prompt_no_tools = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
@@ -488,6 +487,18 @@ class AssistantPlanner:
                 f"最近的用户内容示例: {sample}"
             )
         return "如果无法判断语言，请使用简洁的双语（中文/English）回应用户。"
+
+    def _get_datetime_context(self) -> str:
+        """获取当前日期时间上下文，用于帮助AI理解相对时间"""
+        from datetime import datetime
+        now = datetime.now()
+        weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        weekday = weekday_names[now.weekday()]
+        return (
+            f"【当前时间】{now.strftime('%Y年%m月%d日')} {weekday} {now.strftime('%H:%M')}\n"
+            f"用户说"今天"指的是{now.strftime('%Y-%m-%d')}，"明天"指的是{(now + timedelta(days=1)).strftime('%Y-%m-%d')}。\n"
+            f"设置定时任务时，请使用正确的日期。"
+        )
 
     def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> ToolCallResult:
         """执行工具调用"""
@@ -597,6 +608,7 @@ class AssistantPlanner:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": self._get_language_hint(user_msg)},
+            {"role": "system", "content": self._get_datetime_context()},
         ]
         if context_messages:
             messages.extend(context_messages)
@@ -687,6 +699,7 @@ class AssistantPlanner:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": self._get_language_hint(user_msg)},
+            {"role": "system", "content": self._get_datetime_context()},
         ]
         if context_messages:
             messages.extend(context_messages)
