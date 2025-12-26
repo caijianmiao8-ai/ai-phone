@@ -345,6 +345,59 @@ def parse_action(response: str) -> dict[str, Any]:
     print(f"Parsing action: {response}")
     try:
         response = response.strip()
+
+        # Clean up XML/HTML tags that some models add
+        import re
+
+        # Remove ALL <answer>, <think>, etc. tags (not just one)
+        # Some models output repeated tags like <answer><answer><answer>...
+        response = re.sub(r'<answer>\s*', '', response)
+        response = re.sub(r'</answer>\s*', '', response)
+        response = re.sub(r'<think>\s*', '', response)
+        response = re.sub(r'</think>\s*', '', response)
+        response = re.sub(r'<action>\s*', '', response)
+        response = re.sub(r'</action>\s*', '', response)
+        response = re.sub(r'<response>\s*', '', response)
+        response = re.sub(r'</response>\s*', '', response)
+        response = response.strip()
+
+        # Clean up markdown code block formatting that some models add
+        # Remove ```python or ``` at the start
+        if response.startswith("```"):
+            lines = response.split("\n")
+            # Remove first line if it's just ```python or ```
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            # Remove last line if it's just ```
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response = "\n".join(lines).strip()
+
+        # Remove trailing ``` if present (inline format)
+        if response.endswith("```"):
+            response = response[:-3].strip()
+
+        # Remove literal \n``` at the end (some models output this)
+        # Keep cleaning until no more patterns match
+        cleanup_patterns = [
+            r'\\n```$',         # \n```
+            r'\\n$',            # \n
+            r'```$',            # trailing ```
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for pattern in cleanup_patterns:
+                new_response = re.sub(pattern, '', response).strip()
+                if new_response != response:
+                    response = new_response
+                    changed = True
+                    break
+
+        # Handle empty response - AI model returned nothing
+        if not response:
+            raise ValueError("AI model returned empty response, waiting for retry...")
+
         if response.startswith('do(action="Type"') or response.startswith(
             'do(action="Type_Name"'
         ):

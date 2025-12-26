@@ -43,7 +43,8 @@ class Settings:
     assistant_api_base: str = "https://openrouter.ai/api/v1"
     assistant_api_key: str = ""
     assistant_model: str = "gpt-4o-mini"
-    assistant_require_confirmation: bool = True
+    assistant_require_confirmation: bool = False  # 默认立即执行，无需确认
+    enable_task_analysis: bool = True  # 启用任务执行后的AI分析
 
     # 设备配置
     device_id: Optional[str] = None

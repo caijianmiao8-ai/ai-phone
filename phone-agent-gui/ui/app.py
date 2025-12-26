@@ -21,9 +21,13 @@ from core.device_manager import DeviceManager, DeviceInfo
 from core.device_registry import DeviceRegistry
 from core.file_transfer import FileTransferManager, FileInfo, FileType
 from core.adb_helper import ADBHelper
-from core.agent_wrapper import AgentWrapper, TaskResult
-from core.assistant_planner import AssistantPlanner, StructuredPlan, ChatResponse, ToolCallStatus
+from core.agent_wrapper import AgentWrapper, TaskResult, parse_duration_from_task
+from core.assistant_planner import AssistantPlanner, StructuredPlan, ChatResponse, ToolCallStatus, TaskAnalysisResult
 from core.scheduler import SchedulerManager, JobSpec
+from core.task_history import TaskHistoryManager, TaskExecutionRecord
+from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, PlanStatus
+from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
+from core.task_analyzer import TaskAnalyzer, AnalysisResult
 
 
 # 配置 Gradio 缓存目录
@@ -56,6 +60,86 @@ def clear_gradio_cache():
         return False
 
 
+def preprocess_time_task(task: str, default_step_interval: int = 10) -> Tuple[str, int, int]:
+    """
+    智能预处理包含时间要求的任务
+
+    对于"刷10分钟视频"这样的任务，AI设备端难以理解时间概念。
+    此函数将时间任务转换为具体的操作次数，让设备AI更好地执行。
+
+    Args:
+        task: 原始任务描述
+        default_step_interval: 每个步骤的默认间隔（秒），默认10秒
+
+    Returns:
+        Tuple[str, int, int]: (预处理后的任务描述, 建议的最大步骤数, 目标操作次数)
+        如果不是时间任务，返回 (原任务, 0, 0)
+    """
+    import re
+
+    # 快速检测：如果任务已经包含预处理特征，直接返回原任务
+    # 避免重复处理已经转换过的任务（如 AI 助手已经转换的）
+    already_preprocessed_markers = [
+        r'连续浏览约\d+个',    # "连续浏览约60个视频"
+        r'相当于\d+',          # "(相当于10分钟)"
+        r'约\d+次操作',        # "约60次操作"
+        r'完成约\d+次',        # "完成约60次切换"
+        r'约\d+个视频',        # "约60个视频"
+        r'约\d+条内容',        # "约60条内容"
+    ]
+    for marker in already_preprocessed_markers:
+        if re.search(marker, task):
+            return task, 0, 0
+
+    duration_seconds = parse_duration_from_task(task)
+    if duration_seconds <= 0:
+        return task, 0, 0
+
+    # 计算需要的步骤数
+    target_steps = duration_seconds // default_step_interval
+    if target_steps < 1:
+        target_steps = 1
+
+    # 设置保险的最大步骤数（至少是目标的1.5倍，最低50步）
+    suggested_max_steps = max(50, int(target_steps * 1.5))
+
+    # 识别任务类型并重写描述
+    time_str = ""
+    if duration_seconds >= 3600:
+        hours = duration_seconds / 3600
+        time_str = f"{hours:.1f}小时".replace(".0小时", "小时")
+    elif duration_seconds >= 60:
+        minutes = duration_seconds / 60
+        time_str = f"{int(minutes)}分钟"
+    else:
+        time_str = f"{duration_seconds}秒"
+
+    # 识别不同类型的任务并重写
+    new_task = task
+
+    # 视频类任务
+    if re.search(r'(视频|抖音|快手|短视频|刷)', task):
+        new_task = f"连续浏览约{target_steps}个视频（相当于{time_str}），每个视频观看约{default_step_interval}秒后切换下一个。持续滑动浏览，直到完成约{target_steps}次切换"
+
+    # 浏览类任务
+    elif re.search(r'(浏览|逛|看|阅读|小红书|微博|朋友圈)', task):
+        new_task = f"连续浏览约{target_steps}条内容（相当于{time_str}），每条内容浏览约{default_step_interval}秒后滑动查看下一条。持续浏览直到完成约{target_steps}次滑动"
+
+    # 购物类任务
+    elif re.search(r'(逛店|店铺|商品|淘宝|京东|拼多多)', task):
+        # 购物类任务每个商品可能需要更长时间
+        browse_interval = 15
+        target_steps = duration_seconds // browse_interval
+        suggested_max_steps = max(50, int(target_steps * 1.5))
+        new_task = f"连续浏览约{target_steps}个商品/店铺（相当于{time_str}），每个浏览约{browse_interval}秒后切换下一个"
+
+    # 通用时间任务
+    else:
+        new_task = f"{task}（约{target_steps}次操作，总计{time_str}）"
+
+    return new_task, suggested_max_steps, target_steps
+
+
 # 全局状态
 @dataclass
 class DeviceTaskState:
@@ -63,6 +147,10 @@ class DeviceTaskState:
     status: str = "⏸️ 空闲"
     screenshot: Optional[bytes] = None
     agent: Optional[AgentWrapper] = None
+    # 用户接管状态
+    takeover_event: Optional[threading.Event] = None
+    takeover_message: str = ""
+    waiting_for_takeover: bool = False
 
 
 class AppState:
@@ -88,6 +176,8 @@ class AppState:
         self.device_states: Dict[str, DeviceTaskState] = defaultdict(DeviceTaskState)
         self.state_lock = threading.Lock()
         self.task_queue: List[dict] = []
+        # 定时任务待执行队列（当有任务执行时暂存）
+        self.pending_scheduled_tasks: List[dict] = []
         # AI 助手与调度
         self.assistant_planner = AssistantPlanner(
             api_base=self.settings.assistant_api_base,
@@ -97,6 +187,18 @@ class AppState:
         )
         self.scheduler: Optional[SchedulerManager] = None
         self.latest_plan: Optional[StructuredPlan] = None
+        # 任务历史、计划、队列、分析器
+        self.task_history = TaskHistoryManager()
+        self.task_plan_manager = TaskPlanManager()
+        self.task_queue_manager = TaskQueueManager(max_concurrent=3)
+        self.task_analyzer = TaskAnalyzer(
+            history_manager=self.task_history,
+            api_base=self.settings.assistant_api_base,
+            api_key=self.settings.assistant_api_key,
+            model=self.settings.assistant_model,
+        )
+        # 任务分析结果缓存 {record_id: TaskAnalysisResult}
+        self.task_analysis_results: Dict[str, TaskAnalysisResult] = {}
         # 注册工具处理器
         self._register_tool_handlers()
 
@@ -107,6 +209,8 @@ class AppState:
         self.assistant_planner.register_tool_handler("query_knowledge_base", self._tool_query_knowledge_base)
         self.assistant_planner.register_tool_handler("schedule_task", self._tool_schedule_task)
         self.assistant_planner.register_tool_handler("get_task_status", self._tool_get_task_status)
+        self.assistant_planner.register_tool_handler("analyze_task_history", self._tool_analyze_task_history)
+        self.assistant_planner.register_tool_handler("get_execution_summary", self._tool_get_execution_summary)
 
     def _tool_execute_task(
         self,
@@ -115,7 +219,10 @@ class AppState:
         device_ids: List[str] = None,
         use_knowledge: bool = None,
     ) -> dict:
-        """工具：立即执行任务（支持多设备）"""
+        """工具：立即执行任务（支持多设备）
+
+        如果不传 device_id 或 device_ids，默认在所有在线设备上执行。
+        """
         if self.is_task_running:
             return {"success": False, "message": "已有任务在执行中，请等待完成"}
 
@@ -123,12 +230,32 @@ class AppState:
         if device_id and not target_list:
             target_list = [device_id]
 
+        # 如果没有指定设备，默认选择所有在线设备（不使用 current_device）
+        if not target_list:
+            online_devices = self.device_manager.scan_devices(include_saved_offline=False)
+            target_list = [d.device_id for d in online_devices if d.is_online]
+            if not target_list:
+                return {"success": False, "message": "没有在线设备，请先连接设备"}
+
+        # 智能预处理时间任务
+        original_task = task_description.strip()
+        processed_task, suggested_max_steps, target_count = preprocess_time_task(original_task)
+
+        # 如果是时间任务，记录预处理信息
+        max_steps_override = None
+        if suggested_max_steps > 0:
+            max_steps_override = suggested_max_steps
+            self.add_log(f"📊 时间任务预处理: 将执行约{target_count}次操作，最大步骤数设为{suggested_max_steps}")
+            self.add_log(f"📝 原任务: {original_task}")
+            self.add_log(f"📝 转换为: {processed_task[:100]}...")
+
         use_kb = self.settings.knowledge_base_enabled if use_knowledge is None else use_knowledge
         success, warning, available_devices = prepare_task_queue(
-            task_description.strip(),
+            processed_task,
             use_kb,
             target_list,
             force_refresh_devices=True,
+            max_steps_override=max_steps_override,
         )
         if not success:
             return {
@@ -138,7 +265,7 @@ class AppState:
             }
 
         try:
-            start_ok, start_message, _ = start_task_execution(parallel=True)
+            start_ok, start_message, context = start_task_execution(parallel=True)
         except Exception as exc:
             _clear_pending_task_state(available_devices or target_list)
             return {
@@ -155,6 +282,21 @@ class AppState:
                 "device_ids": available_devices,
             }
 
+        # 启动后台线程等待任务完成并清理状态
+        if context:
+            threads = context.get("threads", [])
+            results = context.get("results", {})
+            devices = context.get("devices", available_devices)
+
+            def cleanup_after_completion():
+                _wait_for_task_threads(threads)
+                _collect_execution_outcome(results, devices)
+                # 任务完成后处理待执行的定时任务队列
+                _process_pending_scheduled_tasks()
+
+            cleanup_thread = threading.Thread(target=cleanup_after_completion, daemon=True)
+            cleanup_thread.start()
+
         status = start_message or "任务已启动"
         if warning and warning != start_message:
             status = f"{status} ({warning})"
@@ -163,7 +305,8 @@ class AppState:
             "success": True,
             "message": f"{status} | 目标设备: {', '.join(available_devices)}",
             "device_ids": available_devices,
-            "task": task_description,
+            "task": processed_task,
+            "original_task": original_task if processed_task != original_task else None,
         }
 
     def _tool_list_devices(self) -> dict:
@@ -211,12 +354,9 @@ class AppState:
         device_ids: List[str] = None
     ) -> dict:
         """工具：创建定时任务"""
-        from core.scheduler import SchedulerManager
-
-        if not self.scheduler:
-            self.scheduler = SchedulerManager(
-                task_executor=lambda spec: self._run_scheduled_task(spec)
-            )
+        # 使用统一的调度器初始化，确保使用正确的 task_executor
+        # 不要在这里单独创建 SchedulerManager，否则会使用不同的执行器
+        scheduler = _ensure_scheduler()
 
         # 构建调度规则
         rule = {"type": schedule_type}
@@ -233,7 +373,7 @@ class AppState:
             devices = self.device_manager.scan_devices(include_saved_offline=False)
             targets = [d.device_id for d in devices if d.is_online]
 
-        job = self.scheduler.add_job({
+        job = scheduler.add_job({
             "description": task_description,
             "device_ids": targets,
             "rule": rule,
@@ -273,6 +413,158 @@ class AppState:
                 "is_running": self.is_task_running,
                 "devices": all_status,
             }
+
+    def _tool_analyze_task_history(
+        self,
+        device_id: str = None,
+        task_pattern: str = None,
+        time_range_hours: int = 24,
+    ) -> dict:
+        """工具：分析历史任务执行情况"""
+        try:
+            # 更新分析器配置
+            self.task_analyzer.update_config(
+                api_base=self.settings.assistant_api_base,
+                api_key=self.settings.assistant_api_key,
+                model=self.settings.assistant_model,
+            )
+
+            # 尝试使用AI分析，如果失败则使用基础分析
+            try:
+                result = self.task_analyzer.analyze_with_ai(
+                    device_id=device_id,
+                    time_range_hours=time_range_hours,
+                    task_pattern=task_pattern,
+                )
+            except Exception:
+                result = self.task_analyzer.analyze_basic(
+                    device_id=device_id,
+                    time_range_hours=time_range_hours,
+                )
+
+            # 构建统计表格
+            stats_table = "\n".join([
+                "| 指标 | 数值 |",
+                "| --- | --- |",
+                f"| 任务总数 | {result.total_tasks} |",
+                f"| 成功率 | {result.success_rate:.1%} |",
+                f"| 平均耗时 | {result.average_duration:.1f}秒 |",
+            ])
+
+            # 构建问题表格
+            issues_table = ""
+            if result.common_issues:
+                issues_rows = ["| 序号 | 常见问题 |", "| --- | --- |"]
+                for i, issue in enumerate(result.common_issues[:3], 1):
+                    issues_rows.append(f"| {i} | {issue} |")
+                issues_table = "\n".join(issues_rows)
+
+            # 构建建议表格
+            recommendations_table = ""
+            if result.recommendations:
+                rec_rows = ["| 序号 | 改进建议 |", "| --- | --- |"]
+                for i, rec in enumerate(result.recommendations[:3], 1):
+                    rec_rows.append(f"| {i} | {rec} |")
+                recommendations_table = "\n".join(rec_rows)
+
+            # 组合完整消息
+            full_message = f"🔍 **任务分析报告**\n\n{result.summary}\n\n**统计数据：**\n{stats_table}"
+            if issues_table:
+                full_message += f"\n\n**常见问题：**\n{issues_table}"
+            if recommendations_table:
+                full_message += f"\n\n**改进建议：**\n{recommendations_table}"
+
+            return {
+                "success": True,
+                "summary": result.summary,
+                "statistics": {
+                    "total_tasks": result.total_tasks,
+                    "success_rate": f"{result.success_rate:.1%}",
+                    "average_duration": f"{result.average_duration:.1f}s",
+                },
+                "common_issues": result.common_issues[:3],
+                "recommendations": result.recommendations[:3],
+                "insights": result.insights[:3],
+                "message": full_message,
+                "stats_table": stats_table,
+            }
+        except Exception as e:
+            return {"success": False, "message": f"分析失败: {str(e)}"}
+
+    def _tool_get_execution_summary(
+        self,
+        device_id: str = None,
+        include_recommendations: bool = True,
+    ) -> dict:
+        """工具：获取执行总结"""
+        try:
+            stats = self.task_history.get_statistics(
+                device_id=device_id,
+                time_range_hours=24,
+            )
+
+            # 构建统计表格
+            stats_table = "\n".join([
+                "| 指标 | 数值 |",
+                "| --- | --- |",
+                f"| 统计周期 | 过去24小时 |",
+                f"| 任务总数 | {stats.total_tasks} |",
+                f"| 成功任务 | {stats.successful_tasks} |",
+                f"| 失败任务 | {stats.failed_tasks} |",
+                f"| 成功率 | {stats.success_rate:.1%} |",
+                f"| 平均耗时 | {stats.average_duration:.1f}秒 |",
+                f"| 总耗时 | {stats.total_duration:.1f}秒 |",
+            ])
+
+            result = {
+                "success": True,
+                "period": "过去24小时",
+                "total_tasks": stats.total_tasks,
+                "successful": stats.successful_tasks,
+                "failed": stats.failed_tasks,
+                "success_rate": f"{stats.success_rate:.1%}",
+                "average_duration": f"{stats.average_duration:.1f}s",
+                "total_duration": f"{stats.total_duration:.1f}s",
+            }
+
+            # 构建设备分布表格
+            device_table = ""
+            if stats.tasks_by_device:
+                result["tasks_by_device"] = stats.tasks_by_device
+                device_rows = ["| 设备ID | 任务数 |", "| --- | --- |"]
+                for dev_id, count in stats.tasks_by_device.items():
+                    device_rows.append(f"| {dev_id} | {count} |")
+                device_table = "\n".join(device_rows)
+
+            # 构建错误表格
+            error_table = ""
+            if include_recommendations and stats.most_common_errors:
+                result["common_errors"] = [
+                    {"error": e["error"], "count": e["count"]}
+                    for e in stats.most_common_errors[:3]
+                ]
+                error_rows = ["| 常见错误 | 次数 |", "| --- | --- |"]
+                for e in stats.most_common_errors[:3]:
+                    error_rows.append(f"| {e['error'][:50]} | {e['count']} |")
+                error_table = "\n".join(error_rows)
+
+            # 组合完整消息
+            if stats.total_tasks == 0:
+                full_message = "📊 **执行统计报告**\n\n过去24小时暂无任务执行记录"
+            else:
+                status = "优秀 ✅" if stats.success_rate >= 0.9 else "良好 👍" if stats.success_rate >= 0.7 else "需要关注 ⚠️"
+                full_message = f"📊 **执行统计报告** - 状态：{status}\n\n**统计概览：**\n{stats_table}"
+                if device_table:
+                    full_message += f"\n\n**设备分布：**\n{device_table}"
+                if error_table:
+                    full_message += f"\n\n**常见问题：**\n{error_table}"
+
+            result["message"] = full_message
+            result["stats_table"] = stats_table
+
+            return result
+        except Exception as e:
+            return {"success": False, "message": f"获取总结失败: {str(e)}"}
 
     def _run_scheduled_task(self, spec: JobSpec) -> Tuple[bool, str]:
         """执行定时任务的回调，返回 (success, message)"""
@@ -322,6 +614,48 @@ class AppState:
             state = self.device_states[device_id]
             state.agent = agent
 
+    def request_takeover(self, device_id: str, message: str) -> None:
+        """
+        请求用户接管（阻塞调用，直到用户点击继续）
+        用于替代原来的 input() 阻塞方式
+        """
+        event = threading.Event()
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.takeover_event = event
+            state.takeover_message = message
+            state.waiting_for_takeover = True
+
+        self.add_device_log(device_id, f"⚠️ 需要用户操作: {message}")
+        self.set_device_status(device_id, "⏸️ 等待用户操作")
+
+        # 阻塞等待用户点击继续，最多等待5分钟
+        event.wait(timeout=300)
+
+        with self.state_lock:
+            state = self.device_states[device_id]
+            state.waiting_for_takeover = False
+            state.takeover_message = ""
+            state.takeover_event = None
+
+        self.add_device_log(device_id, "▶️ 用户确认继续执行")
+        self.set_device_status(device_id, "🚀 执行中")
+
+    def continue_takeover(self, device_id: str) -> str:
+        """用户点击继续按钮时调用"""
+        with self.state_lock:
+            state = self.device_states[device_id]
+            if state.takeover_event:
+                state.takeover_event.set()
+                return "已继续执行"
+        return "当前无需操作"
+
+    def get_takeover_status(self, device_id: str) -> Tuple[bool, str]:
+        """获取设备的接管状态"""
+        with self.state_lock:
+            state = self.device_states[device_id]
+            return state.waiting_for_takeover, state.takeover_message
+
     def refresh_assistant_planner(self):
         """同步助手配置"""
         self.assistant_planner.update_config(
@@ -335,6 +669,69 @@ class AppState:
         with self.state_lock:
             logs = self.device_states[device_id].logs
         return "\n".join(logs) if logs else "暂无日志"
+
+    def store_task_analysis(self, record_id: str, analysis: TaskAnalysisResult):
+        """存储任务分析结果，并同步更新任务历史记录"""
+        with self.state_lock:
+            self.task_analysis_results[record_id] = analysis
+            # 限制缓存大小，保留最近100条
+            if len(self.task_analysis_results) > 100:
+                oldest_keys = list(self.task_analysis_results.keys())[:-100]
+                for key in oldest_keys:
+                    del self.task_analysis_results[key]
+
+        # 如果AI分析判定失败，更新任务历史记录的成功状态
+        # 这确保 analyze_task_history 工具能获取正确的成功率
+        if not analysis.success_judgment:
+            record = self.task_history.get_record(record_id)
+            if record and record.success:
+                # AI分析判定失败，但原记录标记为成功，需要更正
+                record.success = False
+                record.error_message = f"AI分析判定失败: {analysis.summary}"
+                self.task_history.update_record(record)
+
+    def get_task_analysis(self, record_id: str) -> Optional[TaskAnalysisResult]:
+        """获取任务分析结果"""
+        with self.state_lock:
+            return self.task_analysis_results.get(record_id)
+
+    def get_recent_analyses(self, limit: int = 10) -> List[TaskAnalysisResult]:
+        """获取最近的分析结果列表"""
+        with self.state_lock:
+            items = list(self.task_analysis_results.values())
+            return items[-limit:] if items else []
+
+    def report_task_to_assistant(self, analysis: TaskAnalysisResult):
+        """将任务执行结果报告给AI助手，添加到对话历史"""
+        # 构建报告消息
+        status = "成功" if analysis.success_judgment else "失败"
+        report_content = f"""【任务执行报告】
+任务: {analysis.task_description}
+设备: {analysis.device_id}
+结果: {status} (置信度: {analysis.confidence})
+总结: {analysis.summary}
+"""
+        if analysis.issues_found:
+            report_content += f"发现问题: {'; '.join(analysis.issues_found)}\n"
+        if analysis.strategy_suggestions:
+            report_content += f"建议: {'; '.join(analysis.strategy_suggestions)}\n"
+
+        # 添加到助手对话历史（作为系统通知）
+        self.assistant_planner.history.append({
+            "role": "user",
+            "content": report_content
+        })
+
+        # 如果任务失败，让AI助手生成复盘建议
+        if not analysis.success_judgment:
+            try:
+                followup = f"以上任务执行失败了，请帮我分析原因并给出改进建议。特别是：\n1. 任务描述是否需要调整？\n2. 执行参数（步数、时间）是否合适？\n3. 有什么预防措施可以避免类似问题？"
+                self.assistant_planner.history.append({
+                    "role": "user",
+                    "content": followup
+                })
+            except Exception:
+                pass
 
     def snapshot_states(self) -> Dict[str, DeviceTaskState]:
         with self.state_lock:
@@ -1053,6 +1450,7 @@ def prepare_task_queue(
     use_knowledge: bool,
     device_ids: List[str],
     force_refresh_devices: bool = True,
+    max_steps_override: Optional[int] = None,
 ) -> Tuple[bool, str, List[str]]:
     """准备任务并放入队列"""
     if not task:
@@ -1067,6 +1465,7 @@ def prepare_task_queue(
             "task": task,
             "use_knowledge": use_knowledge,
             "device_ids": available_devices,
+            "max_steps_override": max_steps_override,
         }]
 
     for device_id in available_devices:
@@ -1076,9 +1475,29 @@ def prepare_task_queue(
     return True, warning or "任务已加入队列", available_devices
 
 
-def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> Optional[TaskResult]:
+def execute_task_for_device(
+    task: str,
+    use_knowledge: bool,
+    device_id: str,
+    max_steps_override: Optional[int] = None,
+) -> Optional[TaskResult]:
     """在单个设备上执行任务"""
     settings = app_state.settings
+
+    # 使用覆盖的max_steps（如果提供）
+    effective_max_steps = max_steps_override if max_steps_override else settings.max_steps
+
+    # 创建执行历史记录
+    record = app_state.task_history.create_record(
+        task_description=task,
+        device_id=device_id,
+        max_steps=effective_max_steps,
+    )
+
+    # 创建接管回调（用于替代CMD的input阻塞）
+    def takeover_callback(msg: str, did: str = device_id):
+        app_state.request_takeover(did, msg)
+
     agent = AgentWrapper(
         api_base_url=settings.api_base_url,
         api_key=settings.api_key,
@@ -1087,23 +1506,33 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
         temperature=settings.temperature,
         device_id=device_id,
         device_type=settings.device_type,
-        max_steps=settings.max_steps,
+        max_steps=effective_max_steps,
         language=settings.language,
         verbose=settings.verbose,
         knowledge_manager=app_state.knowledge_manager if use_knowledge else None,
         use_knowledge_base=use_knowledge,
+        takeover_callback=takeover_callback,
     )
 
-    agent.on_log_callback = lambda msg, did=device_id: app_state.add_device_log(did, msg)
+    # 日志回调：同时记录到设备状态和历史记录
+    def log_callback(msg: str, did: str = device_id, rec_id: str = record.id):
+        app_state.add_device_log(did, msg)
+        app_state.task_history.add_log(rec_id, msg)
+
+    agent.on_log_callback = log_callback
     app_state.set_device_agent(device_id, agent)
     app_state.set_device_status(device_id, "🚀 执行中")
 
     task_gen = agent.run_task(task)
     task_result: Optional[TaskResult] = None
+    steps_executed = 0
+    task_success = False
+    error_message = None
 
     try:
         while True:
             step_result = next(task_gen)
+            steps_executed += 1
             if step_result.screenshot:
                 app_state.set_device_screenshot(device_id, step_result.screenshot)
             status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
@@ -1112,13 +1541,81 @@ def execute_task_for_device(task: str, use_knowledge: bool, device_id: str) -> O
         task_result = stop.value
         if task_result and not task_result.success:
             app_state.set_device_status(device_id, f"❌ {task_result.message}")
+            app_state.task_history.finish_record(
+                record_id=record.id,
+                success=False,
+                message=task_result.message,
+                steps=task_result.steps_executed,
+                error=task_result.message,
+            )
+            task_success = False
+            error_message = task_result.message
         else:
             app_state.set_device_status(device_id, "✅ 任务完成")
+            app_state.task_history.finish_record(
+                record_id=record.id,
+                success=True,
+                message="任务完成",
+                steps=task_result.steps_executed if task_result else steps_executed,
+            )
+            task_success = True
     except Exception as e:
-        app_state.add_device_log(device_id, f"任务执行错误: {str(e)}")
+        error_msg = str(e)
+        app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
         app_state.set_device_status(device_id, f"❌ {e}")
+        app_state.task_history.finish_record(
+            record_id=record.id,
+            success=False,
+            message=error_msg,
+            steps=steps_executed,
+            error=error_msg,
+        )
+        task_success = False
+        error_message = error_msg
     finally:
         app_state.set_device_agent(device_id, None)
+
+    # 任务完成后执行AI分析（如果启用）
+    if getattr(settings, 'enable_task_analysis', True):
+        try:
+            # 获取执行记录的日志
+            updated_record = app_state.task_history.get_record(record.id)
+            logs = updated_record.logs if updated_record else []
+            duration = updated_record.duration_seconds if updated_record else 0.0
+
+            # 调用AI分析
+            app_state.add_device_log(device_id, "🔍 正在分析任务执行情况...")
+            analysis = app_state.assistant_planner.analyze_task_execution(
+                task_description=task,
+                device_id=device_id,
+                success=task_success,
+                steps_executed=steps_executed,
+                duration_seconds=duration,
+                logs=logs,
+                error_message=error_message,
+            )
+
+            # 存储分析结果
+            app_state.store_task_analysis(record.id, analysis)
+
+            # 将结果报告给AI助手（失败任务需要复盘）
+            app_state.report_task_to_assistant(analysis)
+
+            # 记录分析摘要到日志
+            app_state.add_device_log(device_id, "━" * 40)
+            app_state.add_device_log(device_id, "📊 任务分析结果:")
+            status_icon = "✅" if analysis.success_judgment else "❌"
+            app_state.add_device_log(device_id, f"   判定: {status_icon} {'成功' if analysis.success_judgment else '失败'} (置信度: {analysis.confidence})")
+            app_state.add_device_log(device_id, f"   总结: {analysis.summary}")
+            if analysis.issues_found:
+                app_state.add_device_log(device_id, f"   问题: {'; '.join(analysis.issues_found[:3])}")
+            if analysis.strategy_suggestions:
+                app_state.add_device_log(device_id, f"   建议: {'; '.join(analysis.strategy_suggestions[:3])}")
+            app_state.add_device_log(device_id, "━" * 40)
+            if not analysis.success_judgment:
+                app_state.add_device_log(device_id, "💬 失败任务已报告给AI助手，可在对话中查看复盘建议")
+        except Exception as e:
+            app_state.add_device_log(device_id, f"⚠️ 任务分析失败: {str(e)}")
 
     return task_result
 
@@ -1137,7 +1634,12 @@ def start_task_execution(parallel: bool = True):
     threads: List[threading.Thread] = []
 
     def worker(device_id: str):
-        results[device_id] = execute_task_for_device(job["task"], job["use_knowledge"], device_id)
+        results[device_id] = execute_task_for_device(
+            job["task"],
+            job["use_knowledge"],
+            device_id,
+            max_steps_override=job.get("max_steps_override"),
+        )
 
     if parallel:
         for device_id in job["device_ids"]:
@@ -1194,10 +1696,38 @@ def _render_device_status_board() -> str:
     for device_id, state in states.items():
         if not state.logs and state.status == "⏸️ 空闲" and not state.screenshot:
             continue
-        lines.append(f"- **{device_id}**: {state.status}")
+        status_line = f"- **{device_id}**: {state.status}"
+        # 如果正在等待用户操作，显示提示消息
+        if state.waiting_for_takeover and state.takeover_message:
+            status_line += f"\n  > ⚠️ {state.takeover_message}"
+        lines.append(status_line)
     if not lines:
         return "暂无设备状态"
     return "\n".join(lines)
+
+
+def _get_devices_waiting_takeover() -> List[str]:
+    """获取所有等待用户操作的设备"""
+    states = app_state.snapshot_states()
+    waiting = []
+    for device_id, state in states.items():
+        if state.waiting_for_takeover:
+            waiting.append(device_id)
+    return waiting
+
+
+def continue_all_takeovers() -> str:
+    """继续所有等待中的设备"""
+    waiting = _get_devices_waiting_takeover()
+    if not waiting:
+        return "当前没有设备等待操作"
+
+    results = []
+    for device_id in waiting:
+        result = app_state.continue_takeover(device_id)
+        results.append(f"{device_id}: {result}")
+
+    return "已继续执行: " + ", ".join(waiting)
 
 
 def _render_device_logs() -> str:
@@ -1241,7 +1771,16 @@ def run_task(task: str, use_knowledge: bool, device_ids: List[str]):
         return
 
     device_ids = device_ids or []
-    success, message, target_devices = prepare_task_queue(task, use_knowledge, device_ids)
+
+    # 智能预处理时间任务
+    processed_task, suggested_max_steps, target_count = preprocess_time_task(task)
+    max_steps_override = suggested_max_steps if suggested_max_steps > 0 else None
+    if max_steps_override:
+        app_state.add_log(f"📊 时间任务预处理: 将执行约{target_count}次操作，最大步骤数设为{suggested_max_steps}")
+
+    success, message, target_devices = prepare_task_queue(
+        processed_task, use_knowledge, device_ids, max_steps_override=max_steps_override
+    )
     if not success:
         yield message, _render_screenshot_gallery(), _render_device_logs(), _render_device_status_board()
         return
@@ -1308,13 +1847,88 @@ def get_task_status() -> str:
 
 # ==================== AI 助手与调度 ====================
 
+def _process_pending_scheduled_tasks():
+    """处理待执行的定时任务队列"""
+    while True:
+        with app_state.state_lock:
+            if app_state.is_task_running:
+                # 还有任务在执行，不处理队列
+                return
+            if not app_state.pending_scheduled_tasks:
+                # 队列为空
+                return
+            # 取出下一个待执行的任务
+            pending = app_state.pending_scheduled_tasks.pop(0)
+
+        job = pending["job"]
+        app_state.add_log(f"🔄 开始执行排队中的定时任务: {job.description}")
+
+        # 对定时任务也进行时间预处理
+        processed_task, suggested_max_steps, target_count = preprocess_time_task(job.description)
+        max_steps_override = suggested_max_steps if suggested_max_steps > 0 else None
+        if max_steps_override:
+            app_state.add_log(f"📊 时间任务预处理: 将执行约{target_count}次操作")
+
+        success, warning, target_devices = prepare_task_queue(
+            processed_task, job.use_knowledge, job.device_ids,
+            max_steps_override=max_steps_override,
+        )
+        if not success:
+            app_state.add_log(f"❌ 定时任务准备失败: {warning}")
+            # 继续处理下一个
+            continue
+
+        start_ok, start_message, context = start_task_execution(parallel=job.parallel)
+        if not start_ok or context is None:
+            app_state.add_log(f"❌ 定时任务启动失败: {start_message}")
+            if start_ok and app_state.is_task_running:
+                app_state.is_task_running = False
+            continue
+
+        # 启动后台线程等待完成
+        def cleanup_and_continue():
+            _wait_for_task_threads(context.get("threads"))
+            _collect_execution_outcome(
+                context.get("results", {}), context.get("devices", target_devices)
+            )
+            # 完成后继续处理队列
+            _process_pending_scheduled_tasks()
+
+        threading.Thread(target=cleanup_and_continue, daemon=True).start()
+        return  # 返回，等待这个任务完成后再处理下一个
+
+
 def _ensure_scheduler() -> SchedulerManager:
     if app_state.scheduler:
         return app_state.scheduler
 
     def _task_executor(job: JobSpec):
+        # 检查是否有任务正在执行
+        with app_state.state_lock:
+            if app_state.is_task_running:
+                # 检查是否已经在队列中（避免重复添加）
+                existing_ids = [p["job"].id for p in app_state.pending_scheduled_tasks]
+                if job.id in existing_ids:
+                    app_state.add_log(f"⏳ 任务已在队列中，跳过: {job.description}")
+                    return True, "任务已在队列中"
+                # 加入待执行队列
+                queue_pos = len(app_state.pending_scheduled_tasks) + 1
+                app_state.pending_scheduled_tasks.append({
+                    "job": job,
+                    "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                app_state.add_log(f"⏳ 定时任务已排队 (位置 #{queue_pos}): {job.description}")
+                return True, f"✅ 任务已加入队列（位置 #{queue_pos}），当前任务完成后自动执行"
+
+        # 对定时任务进行时间预处理
+        processed_task, suggested_max_steps, target_count = preprocess_time_task(job.description)
+        max_steps_override = suggested_max_steps if suggested_max_steps > 0 else None
+        if max_steps_override:
+            app_state.add_log(f"📊 时间任务预处理: 将执行约{target_count}次操作")
+
         success, warning, target_devices = prepare_task_queue(
-            job.description, job.use_knowledge, job.device_ids
+            processed_task, job.use_knowledge, job.device_ids,
+            max_steps_override=max_steps_override,
         )
         if not success:
             return False, warning
@@ -1329,6 +1943,9 @@ def _ensure_scheduler() -> SchedulerManager:
         success, final_status = _collect_execution_outcome(
             context.get("results", {}), context.get("devices", target_devices)
         )
+
+        # 任务完成后处理待执行队列
+        threading.Thread(target=_process_pending_scheduled_tasks, daemon=True).start()
 
         status_parts = [start_message or ""]
         if warning and warning != start_message:
@@ -1683,7 +2300,16 @@ def execute_plan_now(plan_data: Dict, use_knowledge: bool, parallel: bool):
     device_ids = plan.get("target_devices") or []
     if not task_desc:
         return "请先生成计划"
-    success, message, targets = prepare_task_queue(task_desc, use_knowledge, device_ids)
+
+    # 智能预处理时间任务
+    processed_task, suggested_max_steps, target_count = preprocess_time_task(task_desc)
+    max_steps_override = suggested_max_steps if suggested_max_steps > 0 else None
+    if max_steps_override:
+        app_state.add_log(f"📊 时间任务预处理: 将执行约{target_count}次操作")
+
+    success, message, targets = prepare_task_queue(
+        processed_task, use_knowledge, device_ids, max_steps_override=max_steps_override
+    )
     if not success:
         return message
     start_ok, start_message, _ = start_task_execution(parallel=parallel)
@@ -2080,6 +2706,7 @@ def create_app() -> gr.Blocks:
                         with gr.Row():
                             run_btn = gr.Button("▶️ 开始执行", variant="primary", scale=2)
                             stop_btn = gr.Button("⏹️ 停止", variant="stop", scale=1)
+                            continue_btn = gr.Button("▶️ 继续执行", variant="secondary", scale=1)
 
                         task_status = gr.Textbox(
                             label="状态",
@@ -2113,6 +2740,14 @@ def create_app() -> gr.Blocks:
 
                 stop_btn.click(
                     fn=stop_task,
+                    outputs=[task_status],
+                ).then(
+                    fn=refresh_task_panels,
+                    outputs=[log_area, device_status_board],
+                )
+
+                continue_btn.click(
+                    fn=continue_all_takeovers,
                     outputs=[task_status],
                 ).then(
                     fn=refresh_task_panels,

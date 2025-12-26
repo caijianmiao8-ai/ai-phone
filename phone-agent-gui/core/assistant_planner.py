@@ -3,7 +3,9 @@
 封装对话式规划逻辑，支持 Tool Calling，复用 OpenAI/OpenRouter 客户端
 """
 import json
+import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, Generator, List, Optional
 
@@ -30,6 +32,54 @@ class StructuredPlan:
         }
 
 
+@dataclass
+class TaskAnalysisResult:
+    """任务执行分析结果"""
+    task_description: str = ""
+    device_id: str = ""
+    success_judgment: bool = False  # AI判断是否成功
+    confidence: str = "中"  # 高/中/低
+    issues_found: List[str] = field(default_factory=list)  # 发现的问题
+    strategy_suggestions: List[str] = field(default_factory=list)  # 策略建议
+    summary: str = ""  # 总结
+    raw_response: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_description": self.task_description,
+            "device_id": self.device_id,
+            "success_judgment": self.success_judgment,
+            "confidence": self.confidence,
+            "issues_found": self.issues_found,
+            "strategy_suggestions": self.strategy_suggestions,
+            "summary": self.summary,
+        }
+
+    def to_markdown(self) -> str:
+        """转换为 Markdown 格式显示"""
+        status = "✅ 成功" if self.success_judgment else "❌ 失败"
+        parts = [
+            f"## 任务执行分析",
+            f"**任务**: {self.task_description}",
+            f"**设备**: {self.device_id}",
+            f"**判定**: {status} (置信度: {self.confidence})",
+            "",
+            f"### 📝 总结",
+            self.summary,
+        ]
+        if self.issues_found:
+            parts.append("")
+            parts.append("### ⚠️ 发现的问题")
+            for issue in self.issues_found:
+                parts.append(f"- {issue}")
+        if self.strategy_suggestions:
+            parts.append("")
+            parts.append("### 💡 策略建议")
+            for suggestion in self.strategy_suggestions:
+                parts.append(f"- {suggestion}")
+        return "\n".join(parts)
+
+
 class ToolCallStatus(Enum):
     """工具调用状态"""
     SUCCESS = "success"
@@ -44,12 +94,67 @@ class ToolCallResult:
     status: ToolCallStatus
     result: Any = None
     error: Optional[str] = None
+    arguments: Dict[str, Any] = field(default_factory=dict)
 
     def to_message(self) -> str:
         """转换为可读消息"""
         if self.status == ToolCallStatus.ERROR:
             return f"❌ {self.tool_name} 执行失败: {self.error}"
         return f"✅ {self.tool_name} 执行成功"
+
+    def to_detailed_message(self) -> str:
+        """转换为详细的可读消息，包含执行内容"""
+        if self.status == ToolCallStatus.ERROR:
+            return f"❌ **执行失败**: {self.error}"
+
+        # 根据工具类型生成不同的详细信息
+        if self.tool_name == "execute_task":
+            task_desc = self.arguments.get("task_description", "")
+            devices = self.arguments.get("device_ids") or [self.arguments.get("device_id", "")]
+            devices_str = ", ".join(d for d in devices if d) or "默认设备"
+            result_msg = ""
+            if isinstance(self.result, dict):
+                result_msg = self.result.get("message", "")
+            return (
+                f"✅ **任务已下发**\n\n"
+                f"| 项目 | 内容 |\n"
+                f"| --- | --- |\n"
+                f"| 📱 发送给设备的指令 | {task_desc} |\n"
+                f"| 🎯 目标设备 | {devices_str} |\n"
+                f"| 📝 执行状态 | {result_msg or '已启动'} |"
+            )
+        elif self.tool_name == "schedule_task":
+            task_desc = self.arguments.get("task_description", "")
+            schedule_type = self.arguments.get("schedule_type", "")
+            schedule_value = self.arguments.get("schedule_value", "")
+            devices = self.arguments.get("device_ids") or []
+            devices_str = ", ".join(devices) if devices else "默认设备"
+            type_map = {"once": "一次性", "interval": "间隔重复", "daily": "每日定时"}
+            return (
+                f"✅ **定时任务已创建**\n\n"
+                f"| 项目 | 内容 |\n"
+                f"| --- | --- |\n"
+                f"| 📱 发送给设备的指令 | {task_desc} |\n"
+                f"| ⏰ 调度类型 | {type_map.get(schedule_type, schedule_type)} |\n"
+                f"| 🕐 调度时间 | {schedule_value} |\n"
+                f"| 🎯 目标设备 | {devices_str} |"
+            )
+        elif self.tool_name == "create_task_plan":
+            name = self.arguments.get("name", "")
+            steps = self.arguments.get("steps", [])
+            result_msg = ""
+            if isinstance(self.result, dict):
+                result_msg = self.result.get("message", "")
+            if result_msg:
+                return f"✅ **任务计划已创建**: {name}\n\n{result_msg}"
+            steps_text = "\n".join(f"  {i+1}. {s.get('description', '')}" for i, s in enumerate(steps))
+            return f"✅ **任务计划已创建**: {name}\n\n**步骤:**\n{steps_text}"
+        else:
+            # 其他工具返回简单消息
+            result_msg = ""
+            if isinstance(self.result, dict):
+                result_msg = self.result.get("message", "")
+            return f"✅ **{self.tool_name}** 执行成功" + (f": {result_msg}" if result_msg else "")
 
 
 @dataclass
@@ -69,7 +174,8 @@ class ChatResponse:
         if self.plan_text:
             parts.append(self.plan_text)
         for tc in self.tool_calls:
-            parts.append(tc.to_message())
+            # 使用详细消息，清晰展示执行内容
+            parts.append(tc.to_detailed_message())
         return "\n\n".join(parts) if parts else ""
 
 
@@ -177,6 +283,52 @@ AVAILABLE_TOOLS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_task_history",
+            "description": "分析历史任务执行情况，识别问题模式并给出改进建议。当用户想了解任务执行情况或需要优化时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": "指定设备ID进行分析，不指定则分析所有设备"
+                    },
+                    "task_pattern": {
+                        "type": "string",
+                        "description": "任务描述关键词，用于筛选特定类型的任务"
+                    },
+                    "time_range_hours": {
+                        "type": "integer",
+                        "description": "分析的时间范围（小时），默认24小时"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_execution_summary",
+            "description": "获取任务执行的总结报告。当用户询问执行结果、成功率、效率等信息时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": "指定设备ID，不指定则返回所有设备的汇总"
+                    },
+                    "include_recommendations": {
+                        "type": "boolean",
+                        "description": "是否包含改进建议，默认true"
+                    }
+                },
+                "required": []
+            }
+        }
     }
 ]
 
@@ -184,7 +336,7 @@ AVAILABLE_TOOLS = [
 class AssistantPlanner:
     """封装对话式规划，支持 Tool Calling，维护历史并输出结构化计划"""
 
-    def __init__(self, api_base: str, api_key: str, model: str, require_confirmation: bool = True):
+    def __init__(self, api_base: str, api_key: str, model: str, require_confirmation: bool = False):
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
@@ -193,49 +345,62 @@ class AssistantPlanner:
         self.enable_tools = True
         self.require_confirmation = require_confirmation
 
-        self.system_prompt = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
+        self.system_prompt = """你是 Phone Agent 的智能任务执行助手。**收到请求后直接调用工具执行，不要只回复文字！**
 
-## 重要概念
-- **用户**：与你对话的人，用自然语言描述需求
-- **执行AI（PhoneAgent）**：另一个AI，负责在手机上执行任务。它会根据你生成的任务描述来操作手机
-- **你的产出**：任务描述（task_description）是给执行AI看的，不是给用户看的
+## 最最重要的规则 - 必须遵守！
 
-## 你的能力
-你可以通过工具调用来：
-1. **execute_task**: 立即执行任务
-2. **list_devices**: 查看可用设备
-3. **query_knowledge_base**: 查询知识库
-4. **schedule_task**: 创建定时任务
-5. **get_task_status**: 查询任务状态
+**任何包含手机操作的请求，都必须调用 execute_task，不能只回复文字！**
 
-## 任务描述的编写规范（非常重要）
-生成的任务描述必须遵循以下原则：
+### 立即执行任务（必须调用 execute_task）：
+- "打开XX"（如"打开主屏幕"、"打开快手"、"打开微信"）
+- "帮我打开"、"去XX"、"进入XX"
+- "刷视频"、"浏览"、"看XX"
+- "发消息"、"搜索"、"点赞"、"评论"
+- "返回"、"回到主屏幕"、"退出"
+- 任何描述手机操作的请求
 
-### ✅ 正确示例
-- "打开微信，搜索联系人'张三'，发送消息：明天下午3点开会"
-- "打开淘宝，搜索'无线蓝牙耳机'，按销量排序，浏览前5个商品"
-- "打开抖音，在搜索框输入'美食探店'，浏览10个视频"
+⚠️ 即使是最简短的指令如"打开主屏幕"，也必须调用 execute_task！
+⚠️ 绝对不能只回复"正在打开"、"主屏幕已打开"这样的文字！
 
-### ❌ 错误示例（不要这样写）
-- "帮你打开微信给张三发消息"（口语化）
-- "用户想要发微信"（描述意图而非指令）
-- "请在手机上操作微信"（模糊）
+### 默认设备规则（重要！）
+**如果用户没有指定设备，默认在所有在线设备上执行！**
+- 调用 execute_task 时，不要传 device_id 或 device_ids 参数
+- 系统会自动选择所有在线设备
+- 只有当用户明确指定某个设备时，才传入 device_id
 
-### 格式要求
-1. 使用祈使句，直接描述操作步骤
-2. 包含所有具体信息（App名称、搜索词、联系人、消息内容等）
-3. 不要使用"帮你"、"请"、"用户想要"等口语化表达
+### 查询历史（调用 analyze_task_history）：
+仅当用户明确询问历史时：
+- "之前任务执行得怎样？"、"分析任务历史"、"成功率多少？"
 
-## 对话流程
-1. 理解用户需求，必要时追问细节
-2. 信息充足后，先输出将要执行的计划，等待用户确认后再调用工具
-3. 在获得用户确认后执行相应工具，并向用户反馈执行结果
+## 可用工具
+1. **execute_task**: 执行任务（不传device_ids则默认所有在线设备）
+2. **schedule_task**: 定时任务
+3. **list_devices**: 查看设备
+4. **get_task_status**: 当前状态
+5. **analyze_task_history**: 历史分析
 
-## 对话风格
-- 友好、简洁、专业
-- 主动引导，一次只问一个问题
-- 使用与用户相同的语言回复
-- 当信息充足时，先输出计划并等待用户确认后再执行"""
+## 时间任务转换
+"刷10分钟视频" → "浏览约60个视频，每个约10秒"
+
+## 正确示例
+用户："打开主屏幕"
+→ 调用 execute_task(task_description="打开主屏幕")  ✅
+
+用户："打开快手"
+→ 调用 execute_task(task_description="打开快手")  ✅
+
+用户："打开快手刷十分钟视频"
+→ 调用 execute_task(task_description="打开快手，浏览约60个视频，每个约10秒")  ✅
+
+## 错误示例（绝对禁止！）
+- ❌ 用户说"打开主屏幕" → 回复"正在打开主屏幕"（错误！必须调用工具）
+- ❌ 用户说"打开快手" → 回复"好的，已打开"（错误！必须调用工具）
+- ❌ 只用文字回复而不调用工具
+
+## 回复要求
+- 必须调用工具，不能只回复文字
+- 调用工具后简要说明结果
+- 使用与用户相同的语言"""
 
         self.system_prompt_no_tools = """你是 Phone Agent 的智能任务规划助手。你的核心职责是：通过对话理解用户需求，并生成可被【执行AI】准确理解的任务指令。
 
@@ -335,13 +500,26 @@ class AssistantPlanner:
             )
         return "如果无法判断语言，请使用简洁的双语（中文/English）回应用户。"
 
+    def _get_datetime_context(self) -> str:
+        """获取当前日期时间上下文，用于帮助AI理解相对时间"""
+        from datetime import datetime
+        now = datetime.now()
+        weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        weekday = weekday_names[now.weekday()]
+        return (
+            f"【当前时间】{now.strftime('%Y年%m月%d日')} {weekday} {now.strftime('%H:%M')}\n"
+            f"用户说'今天'指的是{now.strftime('%Y-%m-%d')}，'明天'指的是{(now + timedelta(days=1)).strftime('%Y-%m-%d')}。\n"
+            f"设置定时任务时，请使用正确的日期。"
+        )
+
     def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> ToolCallResult:
         """执行工具调用"""
         if tool_name not in self.tool_handlers:
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.ERROR,
-                error=f"未注册的工具: {tool_name}"
+                error=f"未注册的工具: {tool_name}",
+                arguments=arguments,
             )
 
         try:
@@ -362,17 +540,20 @@ class AssistantPlanner:
                     status=ToolCallStatus.ERROR,
                     result=result,
                     error=error_message or "工具执行失败",
+                    arguments=arguments,
                 )
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.SUCCESS,
-                result=result
+                result=result,
+                arguments=arguments,
             )
         except Exception as e:
             return ToolCallResult(
                 tool_name=tool_name,
                 status=ToolCallStatus.ERROR,
-                error=str(e)
+                error=str(e),
+                arguments=arguments,
             )
 
     def _build_plan_text(self, tool_calls: List[Dict[str, Any]]) -> str:
@@ -439,6 +620,7 @@ class AssistantPlanner:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": self._get_language_hint(user_msg)},
+            {"role": "system", "content": self._get_datetime_context()},
         ]
         if context_messages:
             messages.extend(context_messages)
@@ -529,6 +711,7 @@ class AssistantPlanner:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "system", "content": self._get_language_hint(user_msg)},
+            {"role": "system", "content": self._get_datetime_context()},
         ]
         if context_messages:
             messages.extend(context_messages)
@@ -601,7 +784,7 @@ class AssistantPlanner:
                 else:
                     result = self._execute_tool(tool_name, arguments)
                     tool_calls_results.append(result)
-                    yield f"\n\n{result.to_message()}"
+                    yield f"\n\n{result.to_detailed_message()}"
 
             plan_text = ""
             if self.require_confirmation and pending_tool_calls:
@@ -697,14 +880,24 @@ class AssistantPlanner:
                 json_lines = []
                 in_block = False
                 for line in lines:
-                    if line.startswith("```"):
+                    if line.strip().startswith("```"):
                         in_block = not in_block
                         continue
-                    if in_block or not line.startswith("```"):
+                    # 只在代码块内收集内容
+                    if in_block:
                         json_lines.append(line)
-                reply = "\n".join(json_lines)
+                reply = "\n".join(json_lines) if json_lines else reply
 
-            payload = json.loads(reply)
+            # 尝试直接解析，如果失败则尝试提取 JSON 对象
+            try:
+                payload = json.loads(reply)
+            except json.JSONDecodeError:
+                # 尝试提取第一个 JSON 对象
+                json_match = re.search(r'\{[\s\S]*\}', reply)
+                if json_match:
+                    payload = json.loads(json_match.group())
+                else:
+                    raise
             description = payload.get("task_description") or payload.get("summary") or "待执行任务"
             targets = payload.get("target_devices") or fallback_devices or []
             frequency = payload.get("frequency") or ""
@@ -723,4 +916,160 @@ class AssistantPlanner:
                 time_requirement=time_requirement,
                 frequency="",
                 raw_text=raw_reply,
+            )
+
+    def analyze_task_execution(
+        self,
+        task_description: str,
+        device_id: str,
+        success: bool,
+        steps_executed: int,
+        duration_seconds: float,
+        logs: List[str],
+        error_message: Optional[str] = None,
+    ) -> TaskAnalysisResult:
+        """
+        分析任务执行结果，判断是否成功完成，识别问题并给出策略建议
+
+        Args:
+            task_description: 任务描述
+            device_id: 设备ID
+            success: 程序判定的成功状态
+            steps_executed: 执行的步骤数
+            duration_seconds: 执行时长（秒）
+            logs: 执行日志列表
+            error_message: 错误信息（如有）
+
+        Returns:
+            TaskAnalysisResult: 分析结果
+        """
+        # 构建日志摘要（限制长度）
+        log_text = "\n".join(logs[-50:]) if logs else "无日志"
+        if len(log_text) > 3000:
+            log_text = log_text[-3000:]
+
+        duration_str = f"{int(duration_seconds // 60)}分{int(duration_seconds % 60)}秒"
+
+        analysis_prompt = f"""请分析以下手机自动化任务的执行情况，判断任务是否真正完成，识别问题并给出改进建议。
+
+## 任务信息
+- **任务描述**: {task_description}
+- **执行设备**: {device_id}
+- **程序状态**: {"成功" if success else "失败"}
+- **执行步数**: {steps_executed} 步
+- **执行时长**: {duration_str}
+- **错误信息**: {error_message or "无"}
+
+## 执行日志
+```
+{log_text}
+```
+
+## 请返回 JSON 格式的分析结果
+{{
+    "success_judgment": true/false,  // 你判断任务是否真正完成了预期目标
+    "confidence": "高/中/低",  // 判断的置信度
+    "issues_found": ["问题1", "问题2"],  // 发现的问题列表
+    "strategy_suggestions": ["建议1", "建议2"],  // 改进策略建议
+    "summary": "简要总结任务执行情况，2-3句话"
+}}
+
+## 分析要点
+1. **成功判断**: 不要只看程序状态，要根据日志判断任务是否真正达成目标
+   - 例如：任务是"浏览10分钟视频"，但只执行了2分钟就结束，应判断为失败
+   - 例如：任务是"发送微信消息"，但遇到登录页面没有完成，应判断为失败
+2. **问题识别**:
+   - 是否遇到登录/验证障碍？
+   - 是否有重复无效的操作？
+   - 是否正确理解了时间要求？
+   - 是否因为超时或步数限制提前结束？
+3. **策略建议**:
+   - 如何优化任务描述使AI更准确理解？
+   - 是否需要调整时间限制或步数限制？
+   - 是否需要预先处理登录问题？
+
+请只返回 JSON，不要添加其他说明。"""
+
+        try:
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的任务执行分析师，擅长分析自动化任务的执行日志，判断任务是否成功完成，识别问题并给出改进建议。"},
+                    {"role": "user", "content": analysis_prompt},
+                ],
+                temperature=0.2,
+            )
+            raw_reply = (response.choices[0].message.content or "").strip()
+            return self._parse_analysis_result(
+                raw_reply, task_description, device_id, success
+            )
+        except Exception as e:
+            return TaskAnalysisResult(
+                task_description=task_description,
+                device_id=device_id,
+                success_judgment=success,
+                confidence="低",
+                issues_found=[f"分析失败: {str(e)}"],
+                strategy_suggestions=[],
+                summary=f"无法完成分析: {str(e)}",
+                raw_response="",
+            )
+
+    def _parse_analysis_result(
+        self,
+        raw_reply: str,
+        task_description: str,
+        device_id: str,
+        fallback_success: bool,
+    ) -> TaskAnalysisResult:
+        """解析分析结果 JSON"""
+        try:
+            # 尝试提取 JSON
+            reply = raw_reply.strip()
+
+            # 处理 markdown 代码块包裹的情况
+            if reply.startswith("```"):
+                lines = reply.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.strip().startswith("```"):
+                        in_block = not in_block
+                        continue
+                    # 只在代码块内收集内容
+                    if in_block:
+                        json_lines.append(line)
+                reply = "\n".join(json_lines) if json_lines else reply
+
+            # 尝试直接解析，如果失败则尝试提取 JSON 对象
+            try:
+                payload = json.loads(reply)
+            except json.JSONDecodeError:
+                # 尝试提取第一个 JSON 对象
+                json_match = re.search(r'\{[\s\S]*\}', reply)
+                if json_match:
+                    payload = json.loads(json_match.group())
+                else:
+                    raise
+            return TaskAnalysisResult(
+                task_description=task_description,
+                device_id=device_id,
+                success_judgment=bool(payload.get("success_judgment", fallback_success)),
+                confidence=str(payload.get("confidence", "中")),
+                issues_found=list(payload.get("issues_found", [])),
+                strategy_suggestions=list(payload.get("strategy_suggestions", [])),
+                summary=str(payload.get("summary", "")),
+                raw_response=raw_reply,
+            )
+        except Exception:
+            return TaskAnalysisResult(
+                task_description=task_description,
+                device_id=device_id,
+                success_judgment=fallback_success,
+                confidence="低",
+                issues_found=["无法解析分析结果"],
+                strategy_suggestions=[],
+                summary=raw_reply[:200] if raw_reply else "分析结果解析失败",
+                raw_response=raw_reply,
             )

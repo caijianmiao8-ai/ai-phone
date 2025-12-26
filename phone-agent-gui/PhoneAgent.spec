@@ -11,6 +11,9 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, coll
 BASE_DIR = os.path.dirname(os.path.abspath(SPEC))
 HOOKS_DIR = os.path.join(BASE_DIR, 'hooks')
 
+# 将项目目录添加到 Python 路径，确保 PyInstaller 能找到本地模块
+sys.path.insert(0, BASE_DIR)
+
 block_cipher = None
 
 # 收集数据文件
@@ -37,6 +40,19 @@ if os.path.exists(kb_data_dir):
 phone_agent_path = os.path.join(BASE_DIR, 'phone_agent')
 if os.path.exists(phone_agent_path):
     datas.append((phone_agent_path, 'phone_agent'))
+
+# 本地模块目录 - 必须添加到datas中
+core_path = os.path.join(BASE_DIR, 'core')
+if os.path.exists(core_path):
+    datas.append((core_path, 'core'))
+
+ui_path = os.path.join(BASE_DIR, 'ui')
+if os.path.exists(ui_path):
+    datas.append((ui_path, 'ui'))
+
+kb_path = os.path.join(BASE_DIR, 'knowledge_base')
+if os.path.exists(kb_path):
+    datas.append((kb_path, 'knowledge_base'))
 
 # 收集 Gradio 及其所有依赖的数据文件
 packages_to_collect = [
@@ -84,15 +100,18 @@ hiddenimports += [
     'json',
     'threading',
     'dataclasses',
-    'phone_agent',
-    'phone_agent.agent',
-    'phone_agent.model',
-    'phone_agent.model.client',
-    'phone_agent.actions',
-    'phone_agent.actions.handler',
-    'phone_agent.adb',
-    'phone_agent.config',
 ]
+
+# 自动收集本地模块的所有子模块
+local_packages = ['phone_agent', 'core', 'ui', 'knowledge_base']
+for pkg in local_packages:
+    try:
+        hiddenimports += collect_submodules(pkg)
+        print(f"Collected submodules for {pkg}")
+    except Exception as e:
+        print(f"Warning: Could not collect submodules for {pkg}: {e}")
+        # 备用：手动添加
+        hiddenimports.append(pkg)
 
 a = Analysis(
     ['main.py'],

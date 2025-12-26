@@ -2,6 +2,7 @@
 Agent包装器模块
 集成原有PhoneAgent，并添加知识库增强功能
 """
+import re
 import sys
 import os
 import base64
@@ -26,6 +27,121 @@ if not os.path.exists(LOCAL_PHONE_AGENT):
         sys.path.insert(0, ORIGINAL_PROJECT_PATH)
 
 from knowledge_base.manager import KnowledgeManager, KnowledgeItem
+
+
+def parse_duration_from_task(task: str) -> int:
+    """
+    从任务描述中解析时间限制（秒）
+
+    支持的格式：
+    - "10分钟" / "10分" / "十分钟"
+    - "5小时" / "2个小时"
+    - "30秒"
+    - "1.5小时" / "1个半小时"
+    - "浏览10分钟视频"
+    - "刷半小时视频"
+
+    排除的格式（表示步骤间隔而非总时长）：
+    - "每10秒" / "每隔10秒"
+    - "约10秒后" / "等10秒"
+    - "观看约10秒" / "浏览10秒后"
+    - "相当于X分钟"（已预处理的任务）
+
+    Returns:
+        时间限制（秒），0 表示未识别到时间
+    """
+    # 检测已预处理的任务特征，直接返回0
+    # 这些模式表明任务已经被 preprocess_time_task 处理过
+    preprocessed_patterns = [
+        r'相当于\d+',           # "相当于10分钟"
+        r'连续浏览约\d+个',      # "连续浏览约60个视频"
+        r'浏览约\d+个',          # "浏览约60个视频"（AI助手生成的格式）
+        r'约\d+次操作',          # "约60次操作"
+        r'完成约\d+次',          # "完成约60次切换"
+        r'约\d+个视频',          # "约60个视频"
+        r'约\d+条内容',          # "约60条内容"
+    ]
+    for p in preprocessed_patterns:
+        if re.search(p, task):
+            return 0
+
+    # 排除表示步骤间隔的模式
+    # 需要从任务中移除这些描述，避免误匹配
+    interval_patterns = [
+        r'每[隔]?\s*\d+(?:\.\d+)?\s*秒',           # "每10秒", "每隔10秒"
+        r'每[隔]?\s*[一二三四五六七八九十两半]+\s*秒',
+        r'[约等待]\s*\d+(?:\.\d+)?\s*秒[后再]',     # "约10秒后", "等10秒后"
+        r'[约等待]\s*[一二三四五六七八九十两半]+\s*秒[后再]',
+        r'观看[约]?\s*\d+(?:\.\d+)?\s*秒',         # "观看约10秒"
+        r'浏览[约]?\s*\d+(?:\.\d+)?\s*秒',         # "浏览约10秒"
+        r'停留[约]?\s*\d+(?:\.\d+)?\s*秒',         # "停留约10秒"
+        r'\d+(?:\.\d+)?\s*秒后[切滑换]',           # "10秒后切换"
+        r'每个.{0,10}\d+(?:\.\d+)?\s*秒',          # "每个视频停留约10秒"
+    ]
+
+    # 创建一个临时任务字符串，移除步骤间隔描述
+    cleaned_task = task
+    for p in interval_patterns:
+        cleaned_task = re.sub(p, '', cleaned_task)
+
+    # 中文数字转阿拉伯数字
+    cn_num_map = {
+        '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+        '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+        '半': 0.5, '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
+        '二十': 20, '三十': 30, '四十': 40, '五十': 50,
+    }
+
+    def convert_cn_num(s: str) -> float:
+        """转换中文数字"""
+        s = s.strip()
+        if s in cn_num_map:
+            return cn_num_map[s]
+        # 尝试匹配 "十X" 格式
+        if s.startswith('十') and len(s) == 2:
+            return 10 + cn_num_map.get(s[1], 0)
+        # 尝试匹配 "X十X" 格式
+        match = re.match(r'([一二三四五六七八九])十([一二三四五六七八九])?', s)
+        if match:
+            tens = cn_num_map.get(match.group(1), 0) * 10
+            ones = cn_num_map.get(match.group(2), 0) if match.group(2) else 0
+            return tens + ones
+        return 0
+
+    # 匹配模式（注意顺序：特殊模式优先）
+    patterns = [
+        # "X个半小时" 特殊处理（必须在普通小时模式之前）
+        (r'(\d+)\s*个半小时', 'half_hour'),
+        (r'([一二三四五六七八九十两]+)\s*个半小时', 'half_hour_cn'),
+        # 分钟（要求"分"后面是"钟"或者后面不是数字，避免误匹配"得了10分"）
+        (r'(\d+(?:\.\d+)?)\s*分钟', 60),
+        (r'(\d+(?:\.\d+)?)\s*分(?=[^数钟]|$)', 60),  # "10分视频" 但不匹配 "10分数"
+        (r'([一二三四五六七八九十两半]+)\s*分钟', 60),
+        # 小时
+        (r'(\d+(?:\.\d+)?)\s*(?:个)?小时', 3600),
+        (r'([一二三四五六七八九十两半]+)\s*(?:个)?小时', 3600),
+        # 秒（只匹配总时长模式，不匹配步骤间隔）
+        (r'(\d+(?:\.\d+)?)\s*秒', 1),
+        (r'([一二三四五六七八九十两半]+)\s*秒', 1),
+    ]
+
+    # 使用清理后的任务字符串进行匹配
+    for pattern, multiplier in patterns:
+        match = re.search(pattern, cleaned_task)
+        if match:
+            num_str = match.group(1)
+            try:
+                num = float(num_str)
+            except ValueError:
+                num = convert_cn_num(num_str)
+
+            if num > 0:
+                # 特殊处理 "X个半小时"
+                if multiplier in ('half_hour', 'half_hour_cn'):
+                    return int((num + 0.5) * 3600)
+                return int(num * multiplier)
+
+    return 0
 
 
 @dataclass
@@ -66,6 +182,9 @@ class AgentWrapper:
         verbose: bool = True,
         knowledge_manager: Optional[KnowledgeManager] = None,
         use_knowledge_base: bool = True,
+        max_duration_seconds: int = 0,  # 新增：时间限制（秒），0表示不限制
+        auto_detect_duration: bool = True,  # 新增：是否从任务描述中自动检测时间
+        takeover_callback: Optional[Callable[[str], None]] = None,  # 用户接管回调
     ):
         self.api_base_url = api_base_url
         self.api_key = (api_key or "").strip()
@@ -79,10 +198,14 @@ class AgentWrapper:
         self.verbose = verbose
         self.knowledge_manager = knowledge_manager
         self.use_knowledge_base = use_knowledge_base
+        self.max_duration_seconds = max_duration_seconds
+        self.auto_detect_duration = auto_detect_duration
+        self.takeover_callback = takeover_callback
 
         self._agent = None
         self._is_running = False
         self._should_stop = False
+        self._current_duration = 0  # 当前任务的时间限制
 
         # 回调函数
         self.on_step_callback: Optional[Callable[[StepResult], None]] = None
@@ -119,11 +242,13 @@ class AgentWrapper:
                 device_id=self.device_id,
                 lang=self.language,
                 verbose=self.verbose,
+                max_duration_seconds=self._current_duration,  # 传递时间限制
             )
 
             self._agent = PhoneAgent(
                 model_config=model_config,
                 agent_config=agent_config,
+                takeover_callback=self.takeover_callback,
             )
 
             return True
@@ -224,6 +349,19 @@ class AgentWrapper:
         history = []
 
         try:
+            # 检测时间限制
+            if self.max_duration_seconds > 0:
+                self._current_duration = self.max_duration_seconds
+            elif self.auto_detect_duration:
+                detected = parse_duration_from_task(task)
+                if detected > 0:
+                    self._current_duration = detected
+                    self._log(f"从任务中检测到时间限制: {detected // 60}分{detected % 60}秒")
+                else:
+                    self._current_duration = 0
+            else:
+                self._current_duration = 0
+
             # 初始化Agent
             self._log("正在初始化Agent...")
             if not self._init_agent():
