@@ -346,6 +346,13 @@ def parse_action(response: str) -> dict[str, Any]:
     try:
         response = response.strip()
 
+        # Clean up XML/HTML tags that some models add
+        # Remove </answer>, </action>, </response> etc. at the end
+        import re
+        response = re.sub(r'</\w+>\s*$', '', response).strip()
+        # Remove <answer>, <action>, <response> etc. at the start
+        response = re.sub(r'^<\w+>\s*', '', response).strip()
+
         # Clean up markdown code block formatting that some models add
         # Remove ```python or ``` at the start
         if response.startswith("```"):
@@ -362,12 +369,25 @@ def parse_action(response: str) -> dict[str, Any]:
         if response.endswith("```"):
             response = response[:-3].strip()
 
-        # Remove literal \n``` at the end (some models output this)
-        while response.endswith("\\n```") or response.endswith("\\n"):
-            if response.endswith("\\n```"):
-                response = response[:-5].strip()
-            elif response.endswith("\\n"):
-                response = response[:-2].strip()
+        # Remove literal \n``` or \n```</answer> at the end (some models output this)
+        # Keep cleaning until no more patterns match
+        cleanup_patterns = [
+            r'\\n```</\w+>$',   # \n```</answer>
+            r'\\n```$',         # \n```
+            r'\\n</\w+>$',      # \n</answer>
+            r'\\n$',            # \n
+            r'```</\w+>$',      # ```</answer>
+            r'</\w+>$',         # </answer>
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for pattern in cleanup_patterns:
+                new_response = re.sub(pattern, '', response).strip()
+                if new_response != response:
+                    response = new_response
+                    changed = True
+                    break
 
         # Handle empty response - AI model returned nothing
         if not response:
