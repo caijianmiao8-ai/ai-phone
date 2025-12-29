@@ -28,6 +28,11 @@ def _run_hdc_command(cmd: list, **kwargs) -> subprocess.CompletedProcess:
     if _HDC_VERBOSE:
         print(f"[HDC] Running command: {' '.join(cmd)}")
 
+    # Ensure proper encoding on Windows when text=True
+    if kwargs.get("text", False) and "encoding" not in kwargs:
+        kwargs["encoding"] = "utf-8"
+        kwargs["errors"] = "replace"
+
     result = subprocess.run(cmd, **kwargs)
 
     if _HDC_VERBOSE and result.returncode != 0:

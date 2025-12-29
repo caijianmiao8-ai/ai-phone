@@ -293,6 +293,8 @@ class ActionHandler:
                                 hdc_prefix + ["shell", "input", "keyevent", keycode],
                                 capture_output=True,
                                 text=True,
+                                encoding="utf-8",
+                                errors="replace",
                             )
                     else:
                         # Assume it's a numeric code
@@ -307,6 +309,8 @@ class ActionHandler:
                         hdc_prefix + ["shell", "input", "keyevent", keycode],
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                     )
         else:
             # ADB devices use standard input keyevent command
@@ -315,6 +319,8 @@ class ActionHandler:
                 cmd_prefix + ["shell", "input", "keyevent", keycode],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
     @staticmethod
