@@ -1038,6 +1038,27 @@ def refresh_screenshot() -> Optional[Image.Image]:
     return None
 
 
+# ==================== 自动刷新功能 ====================
+
+
+def auto_refresh_tick() -> Optional[Image.Image]:
+    """
+    自动刷新定时器回调
+
+    由 Gradio Timer 组件每秒调用一次（当 Timer 处于 active 状态时）
+    直接刷新屏幕截图，提供实时画面显示
+    """
+    if app_state.current_device:
+        try:
+            success, data = app_state.device_manager.take_screenshot(app_state.current_device)
+            if success and data:
+                app_state.current_screenshot = data
+                return Image.open(io.BytesIO(data))
+        except Exception:
+            pass  # 忽略刷新错误，保持当前画面
+    return gr.update()  # 保持不变
+
+
 # ==================== 屏幕操作功能 ====================
 
 # 存储屏幕尺寸用于坐标转换
@@ -2551,9 +2572,18 @@ def create_app() -> gr.Blocks:
                         # 导航按钮
                         with gr.Row():
                             refresh_btn = gr.Button("🔄 刷新")
+                            auto_refresh_checkbox = gr.Checkbox(
+                                label="实时",
+                                value=False,
+                                scale=0,
+                                min_width=60,
+                            )
                             back_btn = gr.Button("◀ 返回")
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
+
+                        # 自动刷新定时器 (每秒刷新)
+                        auto_refresh_timer = gr.Timer(value=1.0, active=False)
 
                         # 滑动按钮
                         with gr.Row():
@@ -2951,6 +2981,19 @@ def create_app() -> gr.Blocks:
             # 屏幕操作
             refresh_btn.click(
                 fn=refresh_screenshot,
+                outputs=[preview_image],
+            )
+
+            # 自动刷新控制
+            auto_refresh_checkbox.change(
+                fn=lambda enabled: gr.Timer(active=enabled),
+                inputs=[auto_refresh_checkbox],
+                outputs=[auto_refresh_timer],
+            )
+
+            # 定时器触发刷新
+            auto_refresh_timer.tick(
+                fn=auto_refresh_tick,
                 outputs=[preview_image],
             )
 

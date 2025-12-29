@@ -333,16 +333,22 @@ class DeviceManager:
 
     def input_text(self, text: str, device_id: str = None) -> Tuple[bool, str]:
         """输入文本（需要先聚焦输入框）"""
+        import base64
+
         args = []
         if device_id:
             args.extend(["-s", device_id])
+
         # 使用 ADB Keyboard 广播方式输入（支持中文）
+        # 必须使用 Base64 编码，这是 ADB Keyboard 的标准接口
+        encoded_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
         args.extend(["shell", "am", "broadcast", "-a",
-                    "ADB_INPUT_TEXT", "--es", "msg", text])
+                    "ADB_INPUT_B64", "--es", "msg", encoded_text])
 
         success, output = self.adb_helper.run_command(args)
         if success:
             return True, f"已输入文本"
+
         # 如果 ADB Keyboard 不可用，回退到基础输入（仅英文）
         args = []
         if device_id:
@@ -352,7 +358,7 @@ class DeviceManager:
         args.extend(["shell", "input", "text", escaped_text])
         success, output = self.adb_helper.run_command(args)
         if success:
-            return True, f"已输入文本 (基础模式)"
+            return True, f"已输入文本 (基础模式，仅支持英文)"
         return False, output or "输入失败"
 
     def press_key(self, keycode: str, device_id: str = None) -> Tuple[bool, str]:
