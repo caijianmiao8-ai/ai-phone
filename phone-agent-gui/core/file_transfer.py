@@ -221,9 +221,31 @@ class FileTransferManager:
         timeout = self._calculate_timeout(file_size)
 
         success, output = self.adb_helper.run_command(args, timeout=timeout)
-        if success:
-            return True, f"已推送到 {target_path}"
-        return False, output or "推送失败"
+        if not success:
+            return False, output or "推送失败"
+
+        # 同步确保文件完全写入
+        sync_args = []
+        if device_id:
+            sync_args.extend(["-s", device_id])
+        sync_args.extend(["shell", "sync"])
+        self.adb_helper.run_command(sync_args, timeout=10)
+
+        # 触发媒体扫描，让文件出现在相册/播放器中
+        file_type = self.get_file_type(filepath)
+        if file_type in (FileType.VIDEO, FileType.AUDIO, FileType.IMAGE):
+            scan_args = []
+            if device_id:
+                scan_args.extend(["-s", device_id])
+            # 使用 am broadcast 触发媒体扫描
+            scan_args.extend([
+                "shell", "am", "broadcast",
+                "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                "-d", f"file://{target_path}"
+            ])
+            self.adb_helper.run_command(scan_args, timeout=10)
+
+        return True, f"已推送到 {target_path}"
 
     def transfer_file(self, file_info: FileInfo, device_id: str = None) -> TransferResult:
         """传输单个文件（根据类型决定安装或推送）"""
