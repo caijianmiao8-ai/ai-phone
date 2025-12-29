@@ -14,6 +14,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(BASE_DIR, "dist")
 BUILD_DIR = os.path.join(BASE_DIR, "build")
 ADB_DIR = os.path.join(BASE_DIR, "adb")
+SCRCPY_DIR = os.path.join(BASE_DIR, "scrcpy")
 
 # 原项目路径
 ORIGINAL_PROJECT = os.path.join(os.path.dirname(BASE_DIR), "Open-AutoGLM-main")
@@ -56,6 +57,52 @@ def download_adb():
     except Exception as e:
         print(f"✗ 下载ADB失败: {e}")
         print("  请手动下载ADB工具并放置到 adb/ 目录")
+        return False
+
+
+def download_scrcpy():
+    """下载scrcpy投屏工具"""
+    if os.path.exists(os.path.join(SCRCPY_DIR, "scrcpy.exe")):
+        print("✓ scrcpy工具已存在")
+        return True
+
+    print("正在下载scrcpy投屏工具...")
+    # scrcpy 官方 Windows 64位版本
+    scrcpy_url = "https://github.com/Genymobile/scrcpy/releases/download/v3.1/scrcpy-win64-v3.1.zip"
+    zip_path = os.path.join(BASE_DIR, "scrcpy-win64.zip")
+
+    try:
+        # 下载
+        print(f"  下载地址: {scrcpy_url}")
+        urllib.request.urlretrieve(scrcpy_url, zip_path)
+
+        print("正在解压scrcpy工具...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(BASE_DIR)
+
+        # scrcpy 解压后目录名类似 scrcpy-win64-v3.1
+        extracted_dir = None
+        for name in os.listdir(BASE_DIR):
+            if name.startswith("scrcpy-win64"):
+                extracted_dir = os.path.join(BASE_DIR, name)
+                break
+
+        if extracted_dir and os.path.exists(extracted_dir):
+            # 移动到 scrcpy 目录
+            if os.path.exists(SCRCPY_DIR):
+                shutil.rmtree(SCRCPY_DIR)
+            shutil.move(extracted_dir, SCRCPY_DIR)
+
+        # 清理
+        os.remove(zip_path)
+
+        print("✓ scrcpy工具下载完成")
+        return True
+
+    except Exception as e:
+        print(f"✗ 下载scrcpy失败: {e}")
+        print("  请手动下载scrcpy并放置到 scrcpy/ 目录")
+        print("  下载地址: https://github.com/Genymobile/scrcpy/releases")
         return False
 
 
@@ -180,18 +227,23 @@ def main():
     print()
 
     # 步骤1: 复制 phone_agent 模块
-    print("[1/4] 集成 phone_agent 模块...")
+    print("[1/5] 集成 phone_agent 模块...")
     if not copy_phone_agent():
         print("\n打包失败: 无法集成 phone_agent 模块")
         sys.exit(1)
 
     # 步骤2: 下载ADB
-    print("\n[2/4] 准备 ADB 工具...")
+    print("\n[2/5] 准备 ADB 工具...")
     if not download_adb():
         print("警告: ADB工具未准备好，继续打包...")
 
-    # 步骤3: 确保必要目录存在
-    print("\n[3/4] 准备资源文件...")
+    # 步骤3: 下载scrcpy
+    print("\n[3/5] 准备 scrcpy 投屏工具...")
+    if not download_scrcpy():
+        print("警告: scrcpy工具未准备好，继续打包...")
+
+    # 步骤4: 确保必要目录存在
+    print("\n[4/5] 准备资源文件...")
 
     # 知识库数据目录
     kb_data_dir = os.path.join(BASE_DIR, "knowledge_base", "data")
@@ -207,8 +259,8 @@ def main():
 
     print("✓ 资源文件准备完成")
 
-    # 步骤4: 构建
-    print("\n[4/4] 构建可执行文件...")
+    # 步骤5: 构建
+    print("\n[5/5] 构建可执行文件...")
     if build_exe():
         create_readme()
         print()

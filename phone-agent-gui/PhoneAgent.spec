@@ -26,6 +26,11 @@ adb_dir = os.path.join(BASE_DIR, 'adb')
 if os.path.exists(adb_dir):
     datas.append((adb_dir, 'adb'))
 
+# scrcpy投屏工具
+scrcpy_dir = os.path.join(BASE_DIR, 'scrcpy')
+if os.path.exists(scrcpy_dir):
+    datas.append((scrcpy_dir, 'scrcpy'))
+
 # 配置目录
 config_dir = os.path.join(BASE_DIR, 'config')
 if os.path.exists(config_dir):

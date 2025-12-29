@@ -2,6 +2,7 @@
 设备管理模块
 管理Android设备的连接、扫描等操作
 """
+import os
 import subprocess
 import re
 from dataclasses import dataclass
@@ -586,10 +587,27 @@ class DeviceManager:
     # 存储运行中的 scrcpy 进程
     _scrcpy_processes: dict = {}
 
+    def get_bundled_scrcpy_path(self) -> str:
+        """获取内置scrcpy工具路径"""
+        import platform
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        scrcpy_dir = os.path.join(base_dir, "scrcpy")
+
+        if platform.system() == "Windows":
+            return os.path.join(scrcpy_dir, "scrcpy.exe")
+        else:
+            return os.path.join(scrcpy_dir, "scrcpy")
+
     def is_scrcpy_available(self) -> Tuple[bool, str]:
         """检查 scrcpy 是否可用"""
         import shutil
         import platform
+
+        # 优先检查内置scrcpy
+        bundled = self.get_bundled_scrcpy_path()
+        if os.path.exists(bundled):
+            return True, bundled
 
         # 检查 scrcpy 是否在 PATH 中
         scrcpy_path = shutil.which("scrcpy")
@@ -604,7 +622,6 @@ class DeviceManager:
                 r"C:\Program Files (x86)\scrcpy\scrcpy.exe",
             ]
             for path in common_paths:
-                import os
                 if os.path.exists(path):
                     return True, path
 
