@@ -47,6 +47,8 @@ class ADBHelper:
                 ["adb", "version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
             if result.returncode == 0:
@@ -68,6 +70,8 @@ class ADBHelper:
                 [adb_path, "version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
             return result.returncode == 0
@@ -85,6 +89,8 @@ class ADBHelper:
                 [adb_path, "version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
             if result.returncode == 0:
@@ -108,6 +114,8 @@ class ADBHelper:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout
             )
             if result.returncode == 0:

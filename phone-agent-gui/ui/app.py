@@ -2582,8 +2582,8 @@ def create_app() -> gr.Blocks:
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
 
-                        # 自动刷新定时器 (每秒刷新)
-                        auto_refresh_timer = gr.Timer(value=1.0, active=False)
+                        # 自动刷新定时器 (每0.5秒刷新，提供更流畅的画面)
+                        auto_refresh_timer = gr.Timer(value=0.5, active=False)
 
                         # 滑动按钮
                         with gr.Row():
