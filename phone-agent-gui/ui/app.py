@@ -1219,6 +1219,41 @@ def handle_enable_adb_keyboard() -> str:
     return f"✅ {msg}" if success else f"❌ {msg}"
 
 
+# ==================== scrcpy 投屏功能 ====================
+
+def handle_start_scrcpy() -> str:
+    """启动 scrcpy 投屏"""
+    if not app_state.current_device:
+        return "❌ 请先选择设备"
+
+    # 检查 scrcpy 是否可用
+    available, path = app_state.device_manager.is_scrcpy_available()
+    if not available:
+        return "❌ scrcpy 未安装\n\n请下载安装: https://github.com/Genymobile/scrcpy/releases"
+
+    # 启动投屏
+    success, msg = app_state.device_manager.start_scrcpy(
+        app_state.current_device,
+        options={
+            "stay_awake": True,
+            "show_touches": True,
+        }
+    )
+
+    if success:
+        return f"✅ {msg}\n\n投屏窗口已打开，可直接在窗口中操作手机"
+    return f"❌ {msg}"
+
+
+def handle_stop_scrcpy() -> str:
+    """停止 scrcpy 投屏"""
+    if not app_state.current_device:
+        return "❌ 请先选择设备"
+
+    success, msg = app_state.device_manager.stop_scrcpy(app_state.current_device)
+    return f"✅ {msg}" if success else f"❌ {msg}"
+
+
 def handle_open_ime_settings() -> Tuple[str, Optional[Image.Image]]:
     """打开输入法设置"""
     if not app_state.current_device:
@@ -2602,6 +2637,9 @@ def create_app() -> gr.Blocks:
                         with gr.Accordion("🔧 快捷工具", open=False):
                             with gr.Row():
                                 with gr.Column():
+                                    gr.Markdown("**📺 实时投屏 (scrcpy)**")
+                                    start_scrcpy_btn = gr.Button("▶️ 启动投屏", variant="primary")
+                                    stop_scrcpy_btn = gr.Button("⏹️ 停止投屏")
                                     gr.Markdown("**ADB键盘 (中文输入)**")
                                     install_adb_kb_btn = gr.Button("📥 检查/安装")
                                     enable_adb_kb_btn = gr.Button("✅ 启用")
@@ -3051,7 +3089,18 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status, preview_image],
             )
 
-            # 快捷工具
+            # 快捷工具 - scrcpy 投屏
+            start_scrcpy_btn.click(
+                fn=handle_start_scrcpy,
+                outputs=[tool_status],
+            )
+
+            stop_scrcpy_btn.click(
+                fn=handle_stop_scrcpy,
+                outputs=[tool_status],
+            )
+
+            # 快捷工具 - ADB键盘
             install_adb_kb_btn.click(
                 fn=handle_install_adb_keyboard,
                 outputs=[tool_status],

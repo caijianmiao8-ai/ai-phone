@@ -580,3 +580,154 @@ class DeviceManager:
             if line.startswith(device_id) and "\tdevice" in line:
                 return True
         return False
+
+    # ==================== scrcpy 投屏功能 ====================
+
+    # 存储运行中的 scrcpy 进程
+    _scrcpy_processes: dict = {}
+
+    def is_scrcpy_available(self) -> Tuple[bool, str]:
+        """检查 scrcpy 是否可用"""
+        import shutil
+        import platform
+
+        # 检查 scrcpy 是否在 PATH 中
+        scrcpy_path = shutil.which("scrcpy")
+        if scrcpy_path:
+            return True, scrcpy_path
+
+        # Windows 下检查常见安装位置
+        if platform.system() == "Windows":
+            common_paths = [
+                r"C:\scrcpy\scrcpy.exe",
+                r"C:\Program Files\scrcpy\scrcpy.exe",
+                r"C:\Program Files (x86)\scrcpy\scrcpy.exe",
+            ]
+            for path in common_paths:
+                import os
+                if os.path.exists(path):
+                    return True, path
+
+        return False, ""
+
+    def start_scrcpy(self, device_id: str = None, options: dict = None) -> Tuple[bool, str]:
+        """
+        启动 scrcpy 投屏
+
+        Args:
+            device_id: 设备ID，不指定则使用默认设备
+            options: 可选参数
+                - max_size: 最大分辨率 (如 1024)
+                - bit_rate: 比特率 (如 "8M")
+                - max_fps: 最大帧率 (如 30)
+                - window_title: 窗口标题
+                - stay_awake: 保持唤醒
+                - turn_screen_off: 关闭手机屏幕
+                - show_touches: 显示触摸点
+
+        Returns:
+            (success, message)
+        """
+        import platform
+
+        # 检查 scrcpy 是否可用
+        available, scrcpy_path = self.is_scrcpy_available()
+        if not available:
+            return False, "scrcpy 未安装。请从 https://github.com/Genymobile/scrcpy 下载安装"
+
+        # 如果该设备已有 scrcpy 运行，先停止
+        if device_id and device_id in self._scrcpy_processes:
+            self.stop_scrcpy(device_id)
+
+        # 构建命令
+        cmd = [scrcpy_path]
+
+        if device_id:
+            cmd.extend(["-s", device_id])
+
+        # 应用选项
+        options = options or {}
+
+        if options.get("max_size"):
+            cmd.extend(["--max-size", str(options["max_size"])])
+        else:
+            cmd.extend(["--max-size", "1024"])  # 默认限制分辨率
+
+        if options.get("bit_rate"):
+            cmd.extend(["--video-bit-rate", options["bit_rate"]])
+
+        if options.get("max_fps"):
+            cmd.extend(["--max-fps", str(options["max_fps"])])
+
+        if options.get("window_title"):
+            cmd.extend(["--window-title", options["window_title"]])
+        elif device_id:
+            cmd.extend(["--window-title", f"投屏 - {device_id}"])
+
+        if options.get("stay_awake"):
+            cmd.append("--stay-awake")
+
+        if options.get("turn_screen_off"):
+            cmd.append("--turn-screen-off")
+
+        if options.get("show_touches"):
+            cmd.append("--show-touches")
+
+        try:
+            # 在后台启动 scrcpy
+            if platform.system() == "Windows":
+                # Windows: 使用 CREATE_NEW_CONSOLE 避免阻塞
+                process = subprocess.Popen(
+                    cmd,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                # Linux/Mac: 直接后台运行
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+
+            # 记录进程
+            key = device_id or "default"
+            self._scrcpy_processes[key] = process
+
+            return True, "投屏已启动"
+
+        except Exception as e:
+            return False, f"启动失败: {str(e)}"
+
+    def stop_scrcpy(self, device_id: str = None) -> Tuple[bool, str]:
+        """停止 scrcpy 投屏"""
+        key = device_id or "default"
+
+        if key not in self._scrcpy_processes:
+            return False, "没有运行中的投屏"
+
+        try:
+            process = self._scrcpy_processes[key]
+            process.terminate()
+            process.wait(timeout=3)
+            del self._scrcpy_processes[key]
+            return True, "投屏已停止"
+        except Exception as e:
+            # 强制杀死
+            try:
+                process.kill()
+                del self._scrcpy_processes[key]
+                return True, "投屏已强制停止"
+            except Exception:
+                return False, f"停止失败: {str(e)}"
+
+    def is_scrcpy_running(self, device_id: str = None) -> bool:
+        """检查 scrcpy 是否正在运行"""
+        key = device_id or "default"
+        if key not in self._scrcpy_processes:
+            return False
+
+        process = self._scrcpy_processes[key]
+        return process.poll() is None  # None 表示仍在运行
