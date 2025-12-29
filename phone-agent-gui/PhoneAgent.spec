@@ -31,6 +31,11 @@ scrcpy_dir = os.path.join(BASE_DIR, 'scrcpy')
 if os.path.exists(scrcpy_dir):
     datas.append((scrcpy_dir, 'scrcpy'))
 
+# ffmpeg视频解码工具
+ffmpeg_dir = os.path.join(BASE_DIR, 'ffmpeg')
+if os.path.exists(ffmpeg_dir):
+    datas.append((ffmpeg_dir, 'ffmpeg'))
+
 # 配置目录
 config_dir = os.path.join(BASE_DIR, 'config')
 if os.path.exists(config_dir):
