@@ -28,6 +28,7 @@ from core.task_history import TaskHistoryManager, TaskExecutionRecord
 from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, PlanStatus
 from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
 from core.task_analyzer import TaskAnalyzer, AnalysisResult
+from core.screen_stream import get_screen_streamer, ScreenStreamer
 
 
 # 配置 Gradio 缓存目录
@@ -1038,25 +1039,59 @@ def refresh_screenshot() -> Optional[Image.Image]:
     return None
 
 
-# ==================== 自动刷新功能 ====================
+# ==================== 实时画面流功能 ====================
 
 
 def auto_refresh_tick() -> Optional[Image.Image]:
     """
     自动刷新定时器回调
 
-    由 Gradio Timer 组件每秒调用一次（当 Timer 处于 active 状态时）
-    直接刷新屏幕截图，提供实时画面显示
+    由 Gradio Timer 组件调用，从屏幕流获取最新画面
     """
-    if app_state.current_device:
-        try:
-            success, data = app_state.device_manager.take_screenshot(app_state.current_device)
-            if success and data:
-                app_state.current_screenshot = data
-                return Image.open(io.BytesIO(data))
-        except Exception:
-            pass  # 忽略刷新错误，保持当前画面
-    return gr.update()  # 保持不变
+    streamer = get_screen_streamer()
+
+    # 如果流正在运行，从流获取画面
+    if streamer.is_running():
+        frame = streamer.get_frame()
+        if frame:
+            # 更新缓存
+            frame_bytes = streamer.get_frame_bytes()
+            if frame_bytes:
+                app_state.current_screenshot = frame_bytes
+            return frame
+
+    # 流未运行时保持当前画面
+    return gr.update()
+
+
+def handle_start_stream() -> Tuple[str, gr.update]:
+    """启动实时画面流"""
+    if not app_state.current_device:
+        return "❌ 请先选择设备", gr.update()
+
+    streamer = get_screen_streamer()
+
+    # 如果已经在运行，先停止
+    if streamer.is_running():
+        streamer.stop()
+
+    # 启动流
+    success, msg = streamer.start(app_state.current_device, fps=10)
+
+    if success:
+        return f"✅ {msg}", gr.Timer(active=True)
+    return f"❌ {msg}", gr.update()
+
+
+def handle_stop_stream() -> Tuple[str, gr.update]:
+    """停止实时画面流"""
+    streamer = get_screen_streamer()
+
+    if not streamer.is_running():
+        return "ℹ️ 流未运行", gr.update()
+
+    success, msg = streamer.stop()
+    return f"✅ {msg}" if success else f"❌ {msg}", gr.Timer(active=False)
 
 
 # ==================== 屏幕操作功能 ====================
@@ -2607,18 +2642,14 @@ def create_app() -> gr.Blocks:
                         # 导航按钮
                         with gr.Row():
                             refresh_btn = gr.Button("🔄 刷新")
-                            auto_refresh_checkbox = gr.Checkbox(
-                                label="实时",
-                                value=False,
-                                scale=0,
-                                min_width=60,
-                            )
+                            start_stream_btn = gr.Button("▶️ 实时", variant="primary", scale=0, min_width=70)
+                            stop_stream_btn = gr.Button("⏹️ 停止", scale=0, min_width=70)
                             back_btn = gr.Button("◀ 返回")
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
 
-                        # 自动刷新定时器 (每0.5秒刷新，提供更流畅的画面)
-                        auto_refresh_timer = gr.Timer(value=0.5, active=False)
+                        # 实时画面流定时器 (100ms = 10 FPS)
+                        stream_timer = gr.Timer(value=0.1, active=False)
 
                         # 滑动按钮
                         with gr.Row():
@@ -3022,15 +3053,19 @@ def create_app() -> gr.Blocks:
                 outputs=[preview_image],
             )
 
-            # 自动刷新控制
-            auto_refresh_checkbox.change(
-                fn=lambda enabled: gr.Timer(active=enabled),
-                inputs=[auto_refresh_checkbox],
-                outputs=[auto_refresh_timer],
+            # 实时画面流控制
+            start_stream_btn.click(
+                fn=handle_start_stream,
+                outputs=[operation_status, stream_timer],
             )
 
-            # 定时器触发刷新
-            auto_refresh_timer.tick(
+            stop_stream_btn.click(
+                fn=handle_stop_stream,
+                outputs=[operation_status, stream_timer],
+            )
+
+            # 定时器触发画面更新
+            stream_timer.tick(
                 fn=auto_refresh_tick,
                 outputs=[preview_image],
             )
