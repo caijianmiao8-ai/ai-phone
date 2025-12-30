@@ -68,6 +68,8 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 
         streamer = get_screen_streamer()
         last_frame_id = 0
+        loading_sent = False
+        wait_start = time.time()
 
         try:
             while True:
@@ -80,18 +82,54 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                     current_id = streamer._frame_id
                     if current_id > last_frame_id:
                         last_frame_id = current_id
-                        self.wfile.write(b'--frame\r\n')
-                        self.wfile.write(b'Content-Type: image/jpeg\r\n')
-                        self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n'.encode())
-                        self.wfile.write(b'\r\n')
-                        self.wfile.write(frame_bytes)
-                        self.wfile.write(b'\r\n')
-                        self.wfile.flush()
+                        self._send_frame(frame_bytes)
+                        loading_sent = False  # 收到真实帧后重置
+                else:
+                    # 没有帧时，每秒发送一次加载占位帧
+                    if not loading_sent or (time.time() - wait_start) > 1.0:
+                        loading_frame = self._create_loading_frame()
+                        if loading_frame:
+                            self._send_frame(loading_frame)
+                            loading_sent = True
+                            wait_start = time.time()
 
                 time.sleep(0.04)  # 25fps
 
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
+
+    def _send_frame(self, frame_bytes: bytes):
+        """发送单帧"""
+        self.wfile.write(b'--frame\r\n')
+        self.wfile.write(b'Content-Type: image/jpeg\r\n')
+        self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n'.encode())
+        self.wfile.write(b'\r\n')
+        self.wfile.write(frame_bytes)
+        self.wfile.write(b'\r\n')
+        self.wfile.flush()
+
+    def _create_loading_frame(self) -> Optional[bytes]:
+        """创建加载占位帧"""
+        try:
+            from PIL import Image, ImageDraw
+            # 创建一个简单的加载画面
+            img = Image.new('RGB', (360, 640), color=(30, 30, 30))
+            draw = ImageDraw.Draw(img)
+            # 绘制加载文本
+            text = "Loading..."
+            # 获取文本大小
+            bbox = draw.textbbox((0, 0), text)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            x = (360 - text_width) // 2
+            y = (640 - text_height) // 2
+            draw.text((x, y), text, fill=(128, 128, 128))
+            # 转为 JPEG
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=50)
+            return buffer.getvalue()
+        except Exception:
+            return None
 
     def _handle_status(self):
         """返回流状态"""
