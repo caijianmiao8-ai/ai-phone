@@ -1172,13 +1172,16 @@ def _generate_cloud_phone_html(stream_url: str, api_base: str) -> str:
 def _handle_device_operation(op_type: str, data: dict):
     """处理来自 MJPEG 服务器的操作请求"""
     if not app_state.current_device:
+        print(f"[云手机] 操作失败: 未选择设备")
         return
 
     screen_w, screen_h = _get_screen_size()
+    print(f"[云手机] 收到操作: {op_type}, 数据: {data}, 屏幕: {screen_w}x{screen_h}")
 
     if op_type == 'tap':
         x = int(data.get('x', 0.5) * screen_w)
         y = int(data.get('y', 0.5) * screen_h)
+        print(f"[云手机] 执行点击: ({x}, {y})")
         app_state.device_manager.tap(x, y, app_state.current_device)
 
     elif op_type == 'swipe':
@@ -1225,8 +1228,9 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
         if not mjpeg.start():
             return "❌ MJPEG 服务器启动失败", "", gr.update()
 
-    # 启动流 (25fps)
-    success, msg = streamer.start(app_state.current_device, fps=25)
+    # 启动流 - 直接使用截图模式，最可靠
+    # use_scrcpy=False 跳过 scrcpy/screenrecord，直接用截图
+    success, msg = streamer.start(app_state.current_device, fps=10, use_scrcpy=False)
 
     if success:
         # 立即返回 HTML，JavaScript 会处理重试逻辑

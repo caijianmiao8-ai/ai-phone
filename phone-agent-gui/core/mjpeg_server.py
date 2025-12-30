@@ -157,14 +157,19 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             data = {}
 
+        print(f"[MJPEG] 收到操作请求: {op_type}, 数据: {data}")
+
         # 调用回调
         if _operation_callback:
             try:
                 _operation_callback(op_type, data)
+                print(f"[MJPEG] 操作执行成功: {op_type}")
                 self.send_response(200)
             except Exception as e:
+                print(f"[MJPEG] 操作执行失败: {op_type}, 错误: {e}")
                 self.send_response(500)
         else:
+            print(f"[MJPEG] 警告: 回调未注册")
             self.send_response(503)  # Service Unavailable
 
         self.send_header('Content-Type', 'application/json')
