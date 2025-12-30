@@ -1206,15 +1206,46 @@ def _handle_device_operation(op_type: str, data: dict):
 set_operation_callback(_handle_device_operation)
 
 
-def _generate_stream_html(stream_url: str) -> str:
-    """生成独立的 MJPEG 视频流 HTML（不包含 JavaScript 点击处理）"""
+def _generate_stream_html(stream_port: int) -> str:
+    """
+    生成独立的 MJPEG 视频流 HTML（不包含 JavaScript 点击处理）
+
+    使用 JavaScript 动态构建 stream URL，使用与当前页面相同的 hostname，
+    这样无论是本地访问、远程 IP 访问还是 share 链接访问，都能正确连接到 MJPEG 服务器
+    """
     return f'''
-<div style="display:flex; justify-content:center;">
-    <img src="{stream_url}"
-         style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2);"
-         onerror="this.style.opacity='0.5'"
-         onload="this.style.opacity='1'" />
+<div id="stream-container" style="display:flex; justify-content:center; flex-direction:column; align-items:center;">
+    <div id="stream-loading" style="color:#888; padding:20px;">正在连接视频流...</div>
+    <img id="mjpeg-stream" style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2); display:none;"
+         onerror="this.style.opacity='0.5'; document.getElementById('stream-loading').textContent='视频流连接失败，请重试'"
+         onload="this.style.display='block'; this.style.opacity='1'; document.getElementById('stream-loading').style.display='none'" />
 </div>
+<script>
+(function() {{
+    var img = document.getElementById('mjpeg-stream');
+    var hostname = window.location.hostname || 'localhost';
+    var streamUrl = 'http://' + hostname + ':{stream_port}/stream?t=' + Date.now();
+    console.log('MJPEG Stream URL:', streamUrl);
+    img.src = streamUrl;
+
+    // 重试逻辑
+    var retryCount = 0;
+    var maxRetries = 5;
+    img.onerror = function() {{
+        if (retryCount < maxRetries) {{
+            retryCount++;
+            document.getElementById('stream-loading').textContent = '重试连接中... (' + retryCount + '/' + maxRetries + ')';
+            document.getElementById('stream-loading').style.display = 'block';
+            setTimeout(function() {{
+                img.src = 'http://' + hostname + ':{stream_port}/stream?t=' + Date.now();
+            }}, 1000);
+        }} else {{
+            document.getElementById('stream-loading').textContent = '视频流连接失败，请检查网络或重新启动实时模式';
+            document.getElementById('stream-loading').style.display = 'block';
+        }}
+    }};
+}})();
+</script>
 '''
 
 
@@ -1256,8 +1287,8 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
     success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
 
     if success:
-        stream_url = mjpeg.get_stream_url()
-        html = _generate_stream_html(stream_url)
+        stream_port = mjpeg.get_stream_port()
+        html = _generate_stream_html(stream_port)
         mode = streamer.get_mode()
         return f"✅ 实时已启动 ({mode})", html, gr.update(visible=False)
 

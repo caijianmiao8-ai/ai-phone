@@ -217,7 +217,7 @@ class MJPEGServer:
 
         for port in ports_to_try:
             try:
-                self._server = ReuseHTTPServer(('127.0.0.1', port), MJPEGHandler)
+                self._server = ReuseHTTPServer(('0.0.0.0', port), MJPEGHandler)
                 self._thread = threading.Thread(target=self._serve, daemon=True)
                 self._thread.start()
                 self._running = True
@@ -251,8 +251,12 @@ class MJPEGServer:
             self._server = None
 
     def get_stream_url(self) -> str:
-        """获取流地址"""
+        """获取流地址（本地访问用）"""
         return f"http://127.0.0.1:{self.port}/stream"
+
+    def get_stream_port(self) -> int:
+        """获取流端口（用于动态构建URL）"""
+        return self.port
 
     def is_running(self) -> bool:
         return self._running
