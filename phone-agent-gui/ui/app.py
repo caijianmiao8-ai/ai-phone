@@ -1052,17 +1052,20 @@ def _generate_cloud_phone_html(stream_url: str, api_base: str) -> str:
     """
     return f'''
 <div id="cloud-phone" style="display:flex; flex-direction:column; align-items:center; gap:10px;">
-    <div style="position:relative; width:360px; height:640px; background:#000; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+    <div id="phone-container" style="position:relative; width:360px; height:640px; background:#1a1a1a; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+        <div id="loading-indicator" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#888; text-align:center; z-index:10;">
+            <div style="font-size:24px; margin-bottom:10px;">⏳</div>
+            <div>正在连接视频流...</div>
+        </div>
         <img id="phone-stream" src="{stream_url}"
-             style="width:100%; height:100%; object-fit:contain;"
-             onerror="this.style.opacity='0.3'"
-             onload="this.style.opacity='1'" />
-        <div id="phone-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; cursor:pointer;"
+             style="width:100%; height:100%; object-fit:contain; opacity:0; transition:opacity 0.3s;"
+             crossorigin="anonymous" />
+        <div id="phone-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; cursor:pointer; z-index:20;"
              onmousedown="handleMouseDown(event)"
              onmouseup="handleMouseUp(event)"
              onmousemove="handleMouseMove(event)"></div>
         <div id="phone-touch" style="position:absolute; width:30px; height:30px; border-radius:50%;
-             background:rgba(255,255,255,0.5); pointer-events:none; display:none; transform:translate(-50%,-50%);"></div>
+             background:rgba(255,255,255,0.5); pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:25;"></div>
     </div>
     <div style="display:flex; gap:8px;">
         <button onclick="sendOp('back')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">◀ 返回</button>
@@ -1073,9 +1076,38 @@ def _generate_cloud_phone_html(stream_url: str, api_base: str) -> str:
 <script>
 (function() {{
     const API = "{api_base}";
+    const STREAM_URL = "{stream_url}";
     const overlay = document.getElementById('phone-overlay');
     const touch = document.getElementById('phone-touch');
+    const streamImg = document.getElementById('phone-stream');
+    const loadingIndicator = document.getElementById('loading-indicator');
     let startX, startY, startTime, isDragging = false;
+    let streamLoaded = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 10;
+
+    // 监听图像加载
+    streamImg.onload = function() {{
+        if (!streamLoaded) {{
+            streamLoaded = true;
+            loadingIndicator.style.display = 'none';
+            streamImg.style.opacity = '1';
+            console.log('云手机视频流已连接');
+        }}
+    }};
+
+    streamImg.onerror = function() {{
+        if (retryCount < MAX_RETRIES) {{
+            retryCount++;
+            loadingIndicator.innerHTML = '<div style="font-size:24px; margin-bottom:10px;">🔄</div><div>重试连接中... (' + retryCount + '/' + MAX_RETRIES + ')</div>';
+            // 重试连接
+            setTimeout(function() {{
+                streamImg.src = STREAM_URL + '?t=' + Date.now();
+            }}, 1000);
+        }} else {{
+            loadingIndicator.innerHTML = '<div style="font-size:24px; margin-bottom:10px;">❌</div><div>连接失败，请重试</div>';
+        }}
+    }};
 
     function getRelPos(e) {{
         const rect = overlay.getBoundingClientRect();
@@ -1197,12 +1229,8 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
     success, msg = streamer.start(app_state.current_device, fps=25)
 
     if success:
-        # 等待第一帧（最多等待2秒）
-        for _ in range(20):
-            time.sleep(0.1)
-            if streamer.get_frame_bytes():
-                break
-
+        # 立即返回 HTML，JavaScript 会处理重试逻辑
+        # 不再阻塞等待第一帧，让用户更快看到加载界面
         stream_url = mjpeg.get_stream_url()
         api_base = f"http://127.0.0.1:{mjpeg.port}"
         html = _generate_cloud_phone_html(stream_url, api_base)
