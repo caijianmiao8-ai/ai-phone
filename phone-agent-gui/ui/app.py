@@ -1240,6 +1240,18 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
         if not mjpeg.start():
             return "❌ MJPEG 服务器启动失败", "", gr.update()
 
+    # 使用现有截图作为初始帧，避免启动时黑屏
+    initial_frame = app_state.current_screenshot
+    if not initial_frame:
+        # 如果没有现有截图，立即获取一张
+        success, data = app_state.device_manager.take_screenshot(app_state.current_device)
+        if success and data:
+            initial_frame = data
+            app_state.current_screenshot = data
+
+    if initial_frame:
+        streamer.set_initial_frame(initial_frame)
+
     # 启动截图流（使用截图模式，最可靠，不依赖 ffmpeg）
     success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
 

@@ -440,6 +440,38 @@ class ScreenStreamer:
                 self._error_message = str(e)
                 time.sleep(0.5)
 
+    def set_initial_frame(self, frame_bytes: bytes) -> bool:
+        """
+        设置初始帧，用于在启动流时立即显示画面
+
+        Args:
+            frame_bytes: JPEG/PNG 图像字节数据
+
+        Returns:
+            是否设置成功
+        """
+        if not frame_bytes:
+            return False
+
+        try:
+            # 验证是有效的图像数据
+            img = Image.open(io.BytesIO(frame_bytes))
+
+            # 转换为 JPEG（如果是 PNG 的话）
+            if img.format != 'JPEG':
+                buffer = io.BytesIO()
+                img.convert('RGB').save(buffer, format='JPEG', quality=75)
+                frame_bytes = buffer.getvalue()
+
+            with self._frame_lock:
+                self._latest_frame = frame_bytes
+                self._frame_id += 1
+                self._cached_image = None
+
+            return True
+        except Exception:
+            return False
+
     def start(self, device_id: str = None, fps: int = 15, use_scrcpy: bool = True) -> Tuple[bool, str]:
         """
         启动屏幕流
