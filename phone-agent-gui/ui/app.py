@@ -1228,9 +1228,9 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
         if not mjpeg.start():
             return "❌ MJPEG 服务器启动失败", "", gr.update()
 
-    # 启动流 - 直接使用截图模式，最可靠
-    # use_scrcpy=False 跳过 scrcpy/screenrecord，直接用截图
-    success, msg = streamer.start(app_state.current_device, fps=10, use_scrcpy=False)
+    # 启动流 - 优先使用 screenrecord 模式（已优化低延迟参数）
+    # 如果失败会自动回退到截图模式
+    success, msg = streamer.start(app_state.current_device, fps=20, use_scrcpy=True)
 
     if success:
         # 立即返回 HTML，JavaScript 会处理重试逻辑

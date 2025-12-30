@@ -134,9 +134,13 @@ class ScreenStreamer:
             # 录制到 stdout (scrcpy 2.0+)
             scrcpy_cmd.extend(["--record=-", "--record-format=h264"])
 
-            # 启动 ffmpeg 解码 H.264 并输出 MJPEG
+            # 启动 ffmpeg 解码 H.264 并输出 MJPEG（低延迟参数）
             ffmpeg_cmd = [
                 ffmpeg,
+                "-fflags", "nobuffer",          # 禁用缓冲
+                "-flags", "low_delay",          # 低延迟模式
+                "-probesize", "32",             # 减少探测大小
+                "-analyzeduration", "0",        # 不分析时长
                 "-f", "h264",
                 "-i", "pipe:0",
                 "-f", "image2pipe",
@@ -269,9 +273,13 @@ class ScreenStreamer:
                 "-"
             ])
 
-            # ffmpeg 解码 H.264 并输出 MJPEG
+            # ffmpeg 解码 H.264 并输出 MJPEG（低延迟参数）
             ffmpeg_cmd = [
                 ffmpeg,
+                "-fflags", "nobuffer",          # 禁用缓冲
+                "-flags", "low_delay",          # 低延迟模式
+                "-probesize", "32",             # 减少探测大小
+                "-analyzeduration", "0",        # 不分析时长
                 "-f", "h264",
                 "-i", "pipe:0",
                 "-f", "image2pipe",
