@@ -1234,22 +1234,23 @@ def handle_recent() -> str:
 
 
 def handle_input_text(text: str) -> str:
-    """输入文本"""
+    """输入文本（异步）"""
     if not app_state.current_device:
         return "请先选择设备"
     if not text:
         return "请输入文本"
 
-    success, msg = app_state.device_manager.input_text(text, app_state.current_device)
-    return f"✅ {msg}" if success else f"❌ {msg}"
+    # 异步执行文本输入
+    _async_command(app_state.device_manager.input_text, text, app_state.current_device)
+    return f"✅ 发送: {text[:20]}{'...' if len(text) > 20 else ''}"
 
 
 def handle_enter() -> str:
-    """回车键"""
+    """回车键（异步）"""
     if not app_state.current_device:
         return "请先选择设备"
-    success, msg = app_state.device_manager.press_enter(app_state.current_device)
-    return f"✅ 回车" if success else f"❌ {msg}"
+    _async_command(app_state.device_manager.press_enter, app_state.current_device)
+    return "✅ 回车"
 
 
 # ADB键盘下载地址
@@ -3093,65 +3094,76 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status, stream_timer],
             )
 
-            # 定时器触发画面更新
+            # 定时器触发画面更新（不进队列，避免被其他事件阻塞）
             stream_timer.tick(
                 fn=auto_refresh_tick,
                 outputs=[preview_image],
+                queue=False,
             )
 
-            # 屏幕点击
+            # 屏幕点击（不进队列，立即执行）
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
+                queue=False,
             )
 
-            # 导航按钮（只更新状态，Timer 负责更新画面）
+            # 导航按钮（不进队列，立即执行）
             back_btn.click(
                 fn=handle_back,
                 outputs=[operation_status],
+                queue=False,
             )
 
             home_btn.click(
                 fn=handle_home,
                 outputs=[operation_status],
+                queue=False,
             )
 
             recent_btn.click(
                 fn=handle_recent,
                 outputs=[operation_status],
+                queue=False,
             )
 
-            # 滑动操作（只更新状态，Timer 负责更新画面）
+            # 滑动操作（不进队列，立即执行）
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
                 outputs=[operation_status],
+                queue=False,
             )
 
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
                 outputs=[operation_status],
+                queue=False,
             )
 
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
                 outputs=[operation_status],
+                queue=False,
             )
 
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
+                queue=False,
             )
 
-            # 文本输入
+            # 文本输入（不进队列，立即执行）
             send_text_btn.click(
                 fn=handle_input_text,
                 inputs=[text_input],
                 outputs=[operation_status],
+                queue=False,
             )
 
             enter_btn.click(
                 fn=handle_enter,
                 outputs=[operation_status],
+                queue=False,
             )
 
             # 快捷工具 - scrcpy 投屏
