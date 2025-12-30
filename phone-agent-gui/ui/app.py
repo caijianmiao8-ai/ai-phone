@@ -1206,58 +1206,52 @@ def _handle_device_operation(op_type: str, data: dict):
 set_operation_callback(_handle_device_operation)
 
 
-def handle_start_stream() -> Tuple[str, str, gr.update]:
+def handle_start_stream() -> Tuple[str, Optional[Image.Image]]:
     """
-    启动云手机模式
+    启动实时模式 - 使用截图刷新
 
-    返回: (状态消息, 云手机HTML, preview_image可见性)
+    返回: (状态消息, 首帧截图)
     """
     if not app_state.current_device:
-        return "❌ 请先选择设备", "", gr.update()
+        return "❌ 请先选择设备", None
 
     streamer = get_screen_streamer()
-    mjpeg = get_mjpeg_server()
 
     # 如果已经在运行，先停止
     if streamer.is_running():
         streamer.stop()
-        time.sleep(0.2)
+        time.sleep(0.1)
 
-    # 启动 MJPEG 服务器
-    if not mjpeg.is_running():
-        if not mjpeg.start():
-            return "❌ MJPEG 服务器启动失败", "", gr.update()
-
-    # 启动流 - 优先使用 screenrecord 模式（已优化低延迟参数）
-    # 如果失败会自动回退到截图模式
-    success, msg = streamer.start(app_state.current_device, fps=20, use_scrcpy=True)
+    # 启动截图流（直接用截图模式，最可靠）
+    success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
 
     if success:
-        # 立即返回 HTML，JavaScript 会处理重试逻辑
-        # 不再阻塞等待第一帧，让用户更快看到加载界面
-        stream_url = mjpeg.get_stream_url()
-        api_base = f"http://127.0.0.1:{mjpeg.port}"
-        html = _generate_cloud_phone_html(stream_url, api_base)
-
+        # 等待第一帧
+        time.sleep(0.3)
+        frame = streamer.get_frame()
         mode = streamer.get_mode()
-        return f"✅ 云手机已启动 ({mode})", html, gr.update(visible=False)
+        return f"✅ 实时已启动 ({mode})", frame
 
-    return f"❌ {msg}", "", gr.update()
+    return f"❌ {msg}", None
 
 
-def handle_stop_stream() -> Tuple[str, str, gr.update]:
-    """
-    停止云手机模式
-
-    返回: (状态消息, 空HTML, preview_image可见性)
-    """
+def handle_stop_stream() -> str:
+    """停止实时模式"""
     streamer = get_screen_streamer()
 
     if not streamer.is_running():
-        return "ℹ️ 未启动", "", gr.update(visible=True)
+        return "ℹ️ 未启动"
 
     success, msg = streamer.stop()
-    return f"✅ {msg}" if success else f"❌ {msg}", "", gr.update(visible=True)
+    return f"✅ {msg}" if success else f"❌ {msg}"
+
+
+def get_stream_frame() -> Optional[Image.Image]:
+    """获取实时帧（供 Timer 调用）"""
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        return streamer.get_frame()
+    return None
 
 
 # ==================== 屏幕操作功能 ====================
@@ -2833,24 +2827,37 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
 
-                        # 云手机模式（MJPEG 流 + JavaScript 交互）
-                        cloud_phone_html = gr.HTML(value="", label="云手机")
-
-                        # 静态截图模式（非实时，仅刷新按钮使用）
+                        # 屏幕预览
                         preview_image = gr.Image(
-                            label="截图预览",
+                            label="屏幕预览",
                             type="pil",
                             height=480,
                             interactive=True,
                         )
+
+                        # 实时刷新定时器（每200ms刷新一次，约5fps）
+                        stream_timer = gr.Timer(value=0.2, active=False)
 
                         operation_status = gr.Textbox(label="", interactive=False, lines=1)
 
                         # 控制按钮
                         with gr.Row():
                             refresh_btn = gr.Button("🔄 截图")
-                            start_stream_btn = gr.Button("▶️ 云手机", variant="primary")
+                            start_stream_btn = gr.Button("▶️ 实时", variant="primary")
                             stop_stream_btn = gr.Button("⏹️ 停止")
+
+                        # 导航按钮
+                        with gr.Row():
+                            back_btn = gr.Button("◀ 返回")
+                            home_btn = gr.Button("⚫ 主页")
+                            recent_btn = gr.Button("☰ 最近")
+
+                        # 滑动按钮
+                        with gr.Row():
+                            swipe_up_btn = gr.Button("⬆️ 上滑")
+                            swipe_down_btn = gr.Button("⬇️ 下滑")
+                            swipe_left_btn = gr.Button("⬅️ 左滑")
+                            swipe_right_btn = gr.Button("➡️ 右滑")
 
                         # 文本输入
                         with gr.Row():
@@ -3247,20 +3254,73 @@ def create_app() -> gr.Blocks:
                 outputs=[preview_image],
             )
 
-            # 云手机模式控制
+            # 实时模式控制
+            def start_stream_and_timer():
+                status, frame = handle_start_stream()
+                return status, frame, gr.Timer(active=True)
+
+            def stop_stream_and_timer():
+                status = handle_stop_stream()
+                return status, gr.Timer(active=False)
+
             start_stream_btn.click(
-                fn=handle_start_stream,
-                outputs=[operation_status, cloud_phone_html, preview_image],
+                fn=start_stream_and_timer,
+                outputs=[operation_status, preview_image, stream_timer],
             )
 
             stop_stream_btn.click(
-                fn=handle_stop_stream,
-                outputs=[operation_status, cloud_phone_html, preview_image],
+                fn=stop_stream_and_timer,
+                outputs=[operation_status, stream_timer],
             )
 
-            # 静态截图模式下的点击（云手机模式下由 JavaScript 处理）
+            # Timer 定时刷新
+            stream_timer.tick(
+                fn=get_stream_frame,
+                outputs=[preview_image],
+            )
+
+            # 截图点击
             preview_image.select(
                 fn=handle_screen_click,
+                outputs=[operation_status],
+                queue=False,
+            )
+
+            # 导航按钮
+            back_btn.click(
+                fn=handle_back,
+                outputs=[operation_status],
+                queue=False,
+            )
+            home_btn.click(
+                fn=handle_home,
+                outputs=[operation_status],
+                queue=False,
+            )
+            recent_btn.click(
+                fn=handle_recent,
+                outputs=[operation_status],
+                queue=False,
+            )
+
+            # 滑动按钮
+            swipe_up_btn.click(
+                fn=lambda: handle_swipe("up"),
+                outputs=[operation_status],
+                queue=False,
+            )
+            swipe_down_btn.click(
+                fn=lambda: handle_swipe("down"),
+                outputs=[operation_status],
+                queue=False,
+            )
+            swipe_left_btn.click(
+                fn=lambda: handle_swipe("left"),
+                outputs=[operation_status],
+                queue=False,
+            )
+            swipe_right_btn.click(
+                fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
                 queue=False,
             )
