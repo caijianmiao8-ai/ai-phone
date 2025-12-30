@@ -209,16 +209,122 @@ class ScreenStreamer:
                     pass
             self._scrcpy_process = None
 
+    def _capture_loop_screenrecord(self):
+        """
+        使用 adb screenrecord + ffmpeg 获取视频流
+        不需要 scrcpy，但需要 ffmpeg
+        性能介于 scrcpy 和截图模式之间
+        """
+        adb = self._find_adb()
+        ffmpeg = self._find_ffmpeg()
+
+        if not adb:
+            self._error_message = "ADB 不可用"
+            self._mode = "screenshot"
+            self._capture_loop_screenshot()
+            return
+
+        if not ffmpeg:
+            self._error_message = "ffmpeg 不可用，切换到截图模式"
+            self._mode = "screenshot"
+            self._capture_loop_screenshot()
+            return
+
+        try:
+            # 使用 screenrecord 输出 H.264 到 pipe
+            adb_cmd = [adb]
+            if self._device_id:
+                adb_cmd.extend(["-s", self._device_id])
+            adb_cmd.extend([
+                "exec-out",
+                "screenrecord",
+                "--output-format=h264",
+                "--size", "720x1280",
+                "-"
+            ])
+
+            # ffmpeg 解码 H.264 并输出 MJPEG
+            ffmpeg_cmd = [
+                ffmpeg,
+                "-f", "h264",
+                "-i", "pipe:0",
+                "-f", "image2pipe",
+                "-c:v", "mjpeg",
+                "-q:v", "5",
+                "-r", str(self._target_fps),
+                "pipe:1"
+            ]
+
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.DEVNULL,
+            }
+            if platform.system() == "Windows":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            # 启动 adb screenrecord
+            self._scrcpy_process = subprocess.Popen(adb_cmd, **popen_kwargs)
+
+            # 启动 ffmpeg
+            ffmpeg_kwargs = {
+                "stdin": self._scrcpy_process.stdout,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.DEVNULL,
+            }
+            if platform.system() == "Windows":
+                ffmpeg_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            self._ffmpeg_process = subprocess.Popen(ffmpeg_cmd, **ffmpeg_kwargs)
+
+            # 读取 JPEG 帧
+            jpeg_buffer = b""
+            while self._running:
+                chunk = self._ffmpeg_process.stdout.read(4096)
+                if not chunk:
+                    break
+
+                jpeg_buffer += chunk
+
+                # 查找 JPEG 帧边界
+                while True:
+                    start = jpeg_buffer.find(b"\xff\xd8")
+                    if start == -1:
+                        jpeg_buffer = b""
+                        break
+
+                    end = jpeg_buffer.find(b"\xff\xd9", start)
+                    if end == -1:
+                        jpeg_buffer = jpeg_buffer[start:]
+                        break
+
+                    frame = jpeg_buffer[start:end + 2]
+                    jpeg_buffer = jpeg_buffer[end + 2:]
+
+                    with self._frame_lock:
+                        self._latest_frame = frame
+
+        except Exception as e:
+            self._error_message = f"screenrecord 流错误: {e}，切换到截图模式"
+            self._mode = "screenshot"
+            self._stop_processes()
+            if self._running:
+                self._capture_loop_screenshot()
+
     def _capture_loop_screenshot(self):
         """
         使用快速截图的方式获取画面
         这是最可靠的方式，兼容所有设备
+
+        优化策略：使用原始格式(raw)而不是PNG，避免压缩开销
         """
         adb = self._find_adb()
         if not adb:
             self._error_message = "ADB 不可用"
             self._running = False
             return
+
+        # 尝试使用原始格式（更快）
+        use_raw = True
 
         while self._running:
             try:
@@ -228,18 +334,61 @@ class ScreenStreamer:
                 cmd = [adb]
                 if self._device_id:
                     cmd.extend(["-s", self._device_id])
-                cmd.extend(["exec-out", "screencap", "-p"])
+
+                if use_raw:
+                    # 原始格式：不压缩，速度快
+                    cmd.extend(["exec-out", "screencap"])
+                else:
+                    # PNG格式：压缩，速度慢但兼容性好
+                    cmd.extend(["exec-out", "screencap", "-p"])
 
                 # 执行截图
+                popen_kwargs = {
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.DEVNULL,
+                }
+                if platform.system() == "Windows":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
-                    timeout=3
+                    timeout=2
                 )
 
                 if result.returncode == 0 and result.stdout:
+                    frame_data = result.stdout
+
+                    if use_raw:
+                        # 解析原始格式: width(4) + height(4) + format(4) + pixels
+                        if len(frame_data) > 12:
+                            try:
+                                width = struct.unpack('<I', frame_data[0:4])[0]
+                                height = struct.unpack('<I', frame_data[4:8])[0]
+                                # format = struct.unpack('<I', frame_data[8:12])[0]
+
+                                expected_size = 12 + width * height * 4
+                                if len(frame_data) >= expected_size and width > 0 and height > 0:
+                                    pixels = frame_data[12:12 + width * height * 4]
+                                    # RGBA -> RGB 转换并生成 JPEG
+                                    img = Image.frombytes('RGBA', (width, height), pixels)
+                                    img = img.convert('RGB')
+
+                                    # 转为 JPEG 字节（比 PNG 更快）
+                                    buffer = io.BytesIO()
+                                    img.save(buffer, format='JPEG', quality=75)
+                                    frame_data = buffer.getvalue()
+                                else:
+                                    # 数据不完整，回退到 PNG 模式
+                                    use_raw = False
+                                    continue
+                            except Exception:
+                                # 解析失败，回退到 PNG 模式
+                                use_raw = False
+                                continue
+
                     with self._frame_lock:
-                        self._latest_frame = result.stdout
+                        self._latest_frame = frame_data
 
                 # 控制帧率
                 elapsed = time.time() - start_time
@@ -257,10 +406,15 @@ class ScreenStreamer:
         """
         启动屏幕流
 
+        优先级:
+        1. scrcpy 模式 - 最流畅，需要 scrcpy + ffmpeg
+        2. screenrecord 模式 - 较流畅，需要 ffmpeg
+        3. 截图模式 - 兼容性好，但较慢
+
         Args:
             device_id: 设备ID
             fps: 目标帧率 (1-30)
-            use_scrcpy: 是否优先使用 scrcpy 模式
+            use_scrcpy: 是否优先使用 scrcpy/screenrecord 模式
 
         Returns:
             (success, message)
@@ -274,12 +428,22 @@ class ScreenStreamer:
         self._error_message = None
         self._running = True
 
-        # 选择捕获方法
-        if use_scrcpy and self._find_scrcpy() and self._find_ffmpeg():
+        # 选择捕获方法 (按优先级)
+        has_scrcpy = self._find_scrcpy() is not None
+        has_ffmpeg = self._find_ffmpeg() is not None
+
+        if use_scrcpy and has_scrcpy and has_ffmpeg:
+            # 最佳模式：scrcpy 视频流
             self._mode = "scrcpy"
             capture_func = self._capture_loop_scrcpy
-            mode_desc = "scrcpy 视频流"
+            mode_desc = "scrcpy视频流 (最流畅)"
+        elif use_scrcpy and has_ffmpeg:
+            # 次选模式：screenrecord + ffmpeg
+            self._mode = "screenrecord"
+            capture_func = self._capture_loop_screenrecord
+            mode_desc = "screenrecord视频流"
         else:
+            # 后备模式：截图
             self._mode = "screenshot"
             capture_func = self._capture_loop_screenshot
             mode_desc = "截图模式"
@@ -343,7 +507,12 @@ class ScreenStreamer:
     def get_status(self) -> str:
         """获取状态信息"""
         if self._running:
-            mode_name = "scrcpy" if self._mode == "scrcpy" else "截图"
+            mode_names = {
+                "scrcpy": "scrcpy",
+                "screenrecord": "录屏",
+                "screenshot": "截图"
+            }
+            mode_name = mode_names.get(self._mode, self._mode)
             if self._error_message:
                 return f"运行中 [{mode_name}] (有错误: {self._error_message})"
             return f"运行中 [{mode_name}] ({self._target_fps} FPS)"

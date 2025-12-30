@@ -1075,10 +1075,14 @@ def handle_start_stream() -> Tuple[str, gr.update]:
     if streamer.is_running():
         streamer.stop()
 
-    # 启动流
-    success, msg = streamer.start(app_state.current_device, fps=10)
+    # 启动流 (提高帧率到15)
+    success, msg = streamer.start(app_state.current_device, fps=15)
 
     if success:
+        mode = streamer.get_mode()
+        if mode == "screenshot":
+            # 截图模式，提示可以使用 scrcpy 获得更好体验
+            return f"✅ {msg} (截图模式较慢，打包后使用scrcpy模式更流畅)", gr.Timer(active=True)
         return f"✅ {msg}", gr.Timer(active=True)
     return f"❌ {msg}", gr.update()
 
