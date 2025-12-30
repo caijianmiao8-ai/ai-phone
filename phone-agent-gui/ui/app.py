@@ -29,6 +29,7 @@ from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, Plan
 from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
 from core.task_analyzer import TaskAnalyzer, AnalysisResult
 from core.screen_stream import get_screen_streamer, ScreenStreamer
+from core.mjpeg_server import get_mjpeg_server
 
 
 # 配置 Gradio 缓存目录
@@ -1044,7 +1045,7 @@ def refresh_screenshot() -> Optional[Image.Image]:
 
 def auto_refresh_tick() -> Optional[Image.Image]:
     """
-    自动刷新定时器回调
+    自动刷新定时器回调（用于非MJPEG模式的后备）
 
     由 Gradio Timer 组件调用，从屏幕流获取最新画面
     优化：只有在有新帧时才更新 UI，减少不必要的刷新
@@ -1067,38 +1068,139 @@ def auto_refresh_tick() -> Optional[Image.Image]:
     return gr.update()
 
 
-def handle_start_stream() -> Tuple[str, gr.update]:
-    """启动实时画面流"""
+def _generate_mjpeg_html(stream_url: str, width: int = 360, height: int = 640) -> str:
+    """
+    生成交互式 MJPEG 流的 HTML 代码
+
+    使用原生浏览器渲染MJPEG，性能最佳
+    透明覆盖层捕获点击事件
+    """
+    return f'''
+    <div id="mjpeg-container" style="position:relative; width:{width}px; height:{height}px; margin:0 auto; background:#000; border-radius:8px; overflow:hidden;">
+        <img id="mjpeg-stream" src="{stream_url}"
+             style="width:100%; height:100%; object-fit:contain; display:block;"
+             onerror="this.style.display='none'; document.getElementById('mjpeg-error').style.display='flex';"
+             onload="this.style.display='block'; document.getElementById('mjpeg-error').style.display='none';" />
+        <div id="mjpeg-error" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%;
+             background:#1a1a1a; color:#888; justify-content:center; align-items:center; flex-direction:column;">
+            <span style="font-size:24px;">📺</span>
+            <span style="margin-top:8px;">加载中...</span>
+        </div>
+        <div id="mjpeg-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; cursor:crosshair;"
+             onclick="handleMjpegClick(event)"></div>
+    </div>
+    <script>
+        function handleMjpegClick(event) {{
+            const rect = event.target.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            const relX = x / rect.width;
+            const relY = y / rect.height;
+
+            // 发送点击事件到 Gradio
+            const clickInput = document.querySelector('#click-coords-input textarea');
+            if (clickInput) {{
+                clickInput.value = relX.toFixed(4) + ',' + relY.toFixed(4);
+                clickInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                // 触发提交
+                setTimeout(() => {{
+                    const submitBtn = document.querySelector('#click-submit-btn');
+                    if (submitBtn) submitBtn.click();
+                }}, 50);
+            }}
+        }}
+    </script>
+    '''
+
+
+def handle_start_stream() -> Tuple[str, str, gr.update, gr.update]:
+    """
+    启动实时画面流
+
+    返回: (状态消息, MJPEG HTML, preview_image更新, timer更新)
+    """
     if not app_state.current_device:
-        return "❌ 请先选择设备", gr.update()
+        return "❌ 请先选择设备", "", gr.update(), gr.update()
 
     streamer = get_screen_streamer()
+    mjpeg_server = get_mjpeg_server()
 
     # 如果已经在运行，先停止
     if streamer.is_running():
         streamer.stop()
+
+    # 启动 MJPEG 服务器
+    if not mjpeg_server.is_running():
+        mjpeg_server.start()
 
     # 启动流 (25fps)
     success, msg = streamer.start(app_state.current_device, fps=25)
 
     if success:
         mode = streamer.get_mode()
-        if mode == "screenshot":
-            # 截图模式，提示可以使用 scrcpy 获得更好体验
-            return f"✅ {msg} (截图模式较慢，打包后使用scrcpy模式更流畅)", gr.Timer(active=True)
-        return f"✅ {msg}", gr.Timer(active=True)
-    return f"❌ {msg}", gr.update()
+        stream_url = mjpeg_server.get_stream_url()
+        mjpeg_html = _generate_mjpeg_html(stream_url)
+
+        # 隐藏静态图片，显示 MJPEG 流
+        return (
+            f"✅ {msg}",
+            mjpeg_html,
+            gr.update(visible=False),  # 隐藏 preview_image
+            gr.update()  # Timer 不再需要
+        )
+
+    return f"❌ {msg}", "", gr.update(), gr.update()
 
 
-def handle_stop_stream() -> Tuple[str, gr.update]:
-    """停止实时画面流"""
+def handle_stop_stream() -> Tuple[str, str, gr.update, gr.update]:
+    """
+    停止实时画面流
+
+    返回: (状态消息, 空HTML, preview_image更新, timer更新)
+    """
     streamer = get_screen_streamer()
 
     if not streamer.is_running():
-        return "ℹ️ 流未运行", gr.update()
+        return "ℹ️ 流未运行", "", gr.update(visible=True), gr.update()
 
     success, msg = streamer.stop()
-    return f"✅ {msg}" if success else f"❌ {msg}", gr.Timer(active=False)
+
+    # 停止后显示静态图片
+    return (
+        f"✅ {msg}" if success else f"❌ {msg}",
+        "",
+        gr.update(visible=True),  # 显示 preview_image
+        gr.update()
+    )
+
+
+def handle_mjpeg_click(coords: str) -> str:
+    """
+    处理 MJPEG 流上的点击事件
+
+    coords: "relX,relY" 格式的相对坐标 (0-1)
+    """
+    if not coords or ',' not in coords:
+        return ""
+
+    if not app_state.current_device:
+        return "请先选择设备"
+
+    try:
+        rel_x, rel_y = map(float, coords.split(','))
+
+        # 获取设备屏幕尺寸
+        screen_w, screen_h = _get_screen_size()
+
+        # 转换为实际坐标
+        real_x = int(rel_x * screen_w)
+        real_y = int(rel_y * screen_h)
+
+        # 执行点击
+        success, msg = app_state.device_manager.tap(real_x, real_y, app_state.current_device)
+        return f"✅ 点击 ({real_x}, {real_y})" if success else f"❌ {msg}"
+    except Exception as e:
+        return f"❌ 坐标解析错误: {e}"
 
 
 # ==================== 屏幕操作功能 ====================
@@ -2622,12 +2724,33 @@ def create_app() -> gr.Blocks:
                     # ===== 右侧：屏幕操作 =====
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
+
+                        # 静态截图（停止流时显示）
                         preview_image = gr.Image(
                             label="点击屏幕直接操作",
                             type="pil",
                             height=480,
                             interactive=True,
                         )
+
+                        # MJPEG 实时流（启动流时显示）
+                        mjpeg_html = gr.HTML(
+                            value="",
+                            label="实时画面",
+                        )
+
+                        # 隐藏的点击坐标输入（用于 JavaScript 与 Python 通信）
+                        click_coords_input = gr.Textbox(
+                            value="",
+                            visible=False,
+                            elem_id="click-coords-input",
+                        )
+                        click_submit_btn = gr.Button(
+                            "提交点击",
+                            visible=False,
+                            elem_id="click-submit-btn",
+                        )
+
                         operation_status = gr.Textbox(label="", interactive=False, lines=1)
 
                         # 导航按钮
@@ -2639,8 +2762,8 @@ def create_app() -> gr.Blocks:
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
 
-                        # 实时画面流定时器 (66ms ≈ 15 FPS UI刷新，配合帧变化检测)
-                        stream_timer = gr.Timer(value=0.066, active=False)
+                        # 实时画面流定时器（后备模式，MJPEG模式下不使用）
+                        stream_timer = gr.Timer(value=0.1, active=False)
 
                         # 滑动按钮
                         with gr.Row():
@@ -3047,20 +3170,28 @@ def create_app() -> gr.Blocks:
             # 实时画面流控制
             start_stream_btn.click(
                 fn=handle_start_stream,
-                outputs=[operation_status, stream_timer],
+                outputs=[operation_status, mjpeg_html, preview_image, stream_timer],
             )
 
             stop_stream_btn.click(
                 fn=handle_stop_stream,
-                outputs=[operation_status, stream_timer],
+                outputs=[operation_status, mjpeg_html, preview_image, stream_timer],
             )
 
-            # 定时器触发画面更新
+            # MJPEG 流点击处理（由 JavaScript 触发）
+            click_submit_btn.click(
+                fn=handle_mjpeg_click,
+                inputs=[click_coords_input],
+                outputs=[operation_status],
+            )
+
+            # 定时器触发画面更新（后备模式）
             stream_timer.tick(
                 fn=auto_refresh_tick,
                 outputs=[preview_image],
             )
 
+            # 静态图片点击（流未启动时）
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
