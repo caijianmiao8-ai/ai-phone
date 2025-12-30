@@ -1304,11 +1304,6 @@ def _async_tap(device_id: str, x: int, y: int):
 
 def handle_screen_click(evt: gr.SelectData) -> str:
     """处理屏幕点击事件（快速返回，不阻塞）"""
-    # 云手机模式下由 JavaScript 处理点击，跳过此处理器
-    streamer = get_screen_streamer()
-    if streamer.is_running():
-        return ""
-
     # 检查事件数据有效性
     if evt is None or evt.index is None:
         return ""
