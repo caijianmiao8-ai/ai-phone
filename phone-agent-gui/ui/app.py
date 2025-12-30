@@ -1051,19 +1051,17 @@ def auto_refresh_tick() -> Optional[Image.Image]:
     """
     streamer = get_screen_streamer()
 
-    # 如果流正在运行，检查是否有新帧
+    # 如果流正在运行，获取新帧
     if streamer.is_running():
-        # 使用 get_frame_if_new 只获取新帧
         frame = streamer.get_frame_if_new()
         if frame:
-            # 有新帧，更新缓存和 UI
+            # 同时更新截图缓存（用于点击坐标转换）
             frame_bytes = streamer.get_frame_bytes()
             if frame_bytes:
                 app_state.current_screenshot = frame_bytes
             return frame
-        # 没有新帧，跳过更新
 
-    # 流未运行或无新帧时，不更新图片
+    # 流未运行或无新帧时，不更新
     return gr.update()
 
 

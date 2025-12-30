@@ -537,15 +537,21 @@ class ScreenStreamer:
         """
         只有在有新帧时才返回，否则返回 None
         用于避免 UI 重复更新同一帧
+        优化：减少锁的持有时间
         """
+        frame_data = None
         with self._frame_lock:
             if self._frame_id > self._last_fetched_id and self._latest_frame:
-                try:
-                    self._cached_image = Image.open(io.BytesIO(self._latest_frame))
-                    self._last_fetched_id = self._frame_id
-                    return self._cached_image
-                except Exception:
-                    pass
+                frame_data = self._latest_frame
+                self._last_fetched_id = self._frame_id
+
+        # 在锁外执行耗时的图像解析
+        if frame_data:
+            try:
+                self._cached_image = Image.open(io.BytesIO(frame_data))
+                return self._cached_image
+            except Exception:
+                pass
         return None
 
     def get_frame_bytes(self) -> Optional[bytes]:
