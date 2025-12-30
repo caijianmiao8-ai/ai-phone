@@ -3247,6 +3247,7 @@ def create_app() -> gr.Blocks:
             refresh_btn.click(
                 fn=refresh_screenshot,
                 outputs=[preview_image],
+                queue=False,
             )
 
             # 实时模式控制
@@ -3261,17 +3262,20 @@ def create_app() -> gr.Blocks:
             start_stream_btn.click(
                 fn=start_stream_and_timer,
                 outputs=[operation_status, preview_image, stream_timer],
+                queue=False,
             )
 
             stop_stream_btn.click(
                 fn=stop_stream_and_timer,
                 outputs=[operation_status, stream_timer],
+                queue=False,
             )
 
-            # Timer 定时刷新
+            # Timer 定时刷新（不排队，确保实时性）
             stream_timer.tick(
                 fn=get_stream_frame,
                 outputs=[preview_image],
+                queue=False,
             )
 
             # 截图点击
