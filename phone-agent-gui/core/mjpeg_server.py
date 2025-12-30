@@ -150,6 +150,11 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'<html><body><img src="/stream" /></body></html>')
 
 
+class ReuseHTTPServer(HTTPServer):
+    """允许端口复用的 HTTP 服务器"""
+    allow_reuse_address = True
+
+
 class MJPEGServer:
     """MJPEG 流服务器管理器"""
 
@@ -160,19 +165,30 @@ class MJPEGServer:
         self._running = False
 
     def start(self) -> bool:
-        """启动服务器"""
+        """启动服务器，支持端口重试"""
         if self._running:
             return True
 
-        try:
-            self._server = HTTPServer(('127.0.0.1', self.port), MJPEGHandler)
-            self._thread = threading.Thread(target=self._serve, daemon=True)
-            self._thread.start()
-            self._running = True
-            return True
-        except Exception as e:
-            print(f"MJPEG 服务器启动失败: {e}")
-            return False
+        # 尝试多个端口
+        ports_to_try = [self.port, self.port + 1, self.port + 2, 8766, 8767, 8768]
+
+        for port in ports_to_try:
+            try:
+                self._server = ReuseHTTPServer(('127.0.0.1', port), MJPEGHandler)
+                self._thread = threading.Thread(target=self._serve, daemon=True)
+                self._thread.start()
+                self._running = True
+                self.port = port  # 更新实际使用的端口
+                print(f"MJPEG 服务器已启动: http://127.0.0.1:{port}")
+                return True
+            except OSError as e:
+                print(f"端口 {port} 不可用: {e}")
+                continue
+            except Exception as e:
+                print(f"MJPEG 服务器启动失败: {e}")
+                continue
+
+        return False
 
     def _serve(self):
         """服务器主循环"""
@@ -185,7 +201,10 @@ class MJPEGServer:
         """停止服务器"""
         self._running = False
         if self._server:
-            self._server.shutdown()
+            try:
+                self._server.shutdown()
+            except Exception:
+                pass
             self._server = None
 
     def get_stream_url(self) -> str:

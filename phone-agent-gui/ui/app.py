@@ -1183,26 +1183,32 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
     streamer = get_screen_streamer()
     mjpeg = get_mjpeg_server()
 
-    # 启动 MJPEG 服务器
-    if not mjpeg.is_running():
-        mjpeg.start()
-
     # 如果已经在运行，先停止
     if streamer.is_running():
         streamer.stop()
+        time.sleep(0.2)
+
+    # 启动 MJPEG 服务器
+    if not mjpeg.is_running():
+        if not mjpeg.start():
+            return "❌ MJPEG 服务器启动失败", "", gr.update()
 
     # 启动流 (25fps)
     success, msg = streamer.start(app_state.current_device, fps=25)
 
     if success:
-        # 等待第一帧
-        time.sleep(0.3)
+        # 等待第一帧（最多等待2秒）
+        for _ in range(20):
+            time.sleep(0.1)
+            if streamer.get_frame_bytes():
+                break
 
         stream_url = mjpeg.get_stream_url()
         api_base = f"http://127.0.0.1:{mjpeg.port}"
         html = _generate_cloud_phone_html(stream_url, api_base)
 
-        return f"✅ 云手机模式已启动", html, gr.update(visible=False)
+        mode = streamer.get_mode()
+        return f"✅ 云手机已启动 ({mode})", html, gr.update(visible=False)
 
     return f"❌ {msg}", "", gr.update()
 
