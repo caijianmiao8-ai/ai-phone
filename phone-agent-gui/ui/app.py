@@ -1047,27 +1047,23 @@ def auto_refresh_tick() -> Optional[Image.Image]:
     自动刷新定时器回调
 
     由 Gradio Timer 组件调用，从屏幕流获取最新画面
+    优化：只有在有新帧时才更新 UI，减少不必要的刷新
     """
     streamer = get_screen_streamer()
 
-    # 如果流正在运行，从流获取画面
+    # 如果流正在运行，检查是否有新帧
     if streamer.is_running():
-        frame = streamer.get_frame()
+        # 使用 get_frame_if_new 只获取新帧
+        frame = streamer.get_frame_if_new()
         if frame:
-            # 更新缓存
+            # 有新帧，更新缓存和 UI
             frame_bytes = streamer.get_frame_bytes()
             if frame_bytes:
                 app_state.current_screenshot = frame_bytes
             return frame
-        else:
-            # 流正在运行但还没有帧，返回缓存的截图
-            if app_state.current_screenshot:
-                try:
-                    return Image.open(io.BytesIO(app_state.current_screenshot))
-                except Exception:
-                    pass
+        # 没有新帧，跳过更新（返回 gr.update() 不触发 UI 刷新）
 
-    # 流未运行或无数据时，不更新图片
+    # 流未运行或无新帧时，不更新图片
     return gr.update()
 
 
@@ -2643,8 +2639,8 @@ def create_app() -> gr.Blocks:
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
 
-                        # 实时画面流定时器 (40ms = 25 FPS)
-                        stream_timer = gr.Timer(value=0.04, active=False)
+                        # 实时画面流定时器 (66ms ≈ 15 FPS UI刷新，配合帧变化检测)
+                        stream_timer = gr.Timer(value=0.066, active=False)
 
                         # 滑动按钮
                         with gr.Row():

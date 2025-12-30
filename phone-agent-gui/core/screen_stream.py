@@ -50,6 +50,11 @@ class ScreenStreamer:
         self._target_fps = 15  # 目标帧率
         self._frame_interval = 1.0 / self._target_fps
 
+        # 帧变化检测
+        self._frame_id = 0  # 每次新帧到达时递增
+        self._last_fetched_id = 0  # 上次获取的帧ID
+        self._cached_image: Optional[Image.Image] = None  # 缓存的 PIL Image
+
     def _find_scrcpy(self) -> Optional[str]:
         """查找 scrcpy 路径"""
         if self.scrcpy_path and os.path.exists(self.scrcpy_path):
@@ -189,6 +194,8 @@ class ScreenStreamer:
 
                     with self._frame_lock:
                         self._latest_frame = frame
+                        self._frame_id += 1
+                        self._cached_image = None  # 清除缓存
 
         except Exception as e:
             self._error_message = f"scrcpy 流错误: {e}，尝试 screenrecord 模式"
@@ -321,6 +328,8 @@ class ScreenStreamer:
 
                     with self._frame_lock:
                         self._latest_frame = frame
+                        self._frame_id += 1
+                        self._cached_image = None
 
         except Exception as e:
             self._error_message = f"screenrecord 流错误: {e}，切换到截图模式"
@@ -408,6 +417,8 @@ class ScreenStreamer:
 
                     with self._frame_lock:
                         self._latest_frame = frame_data
+                        self._frame_id += 1
+                        self._cached_image = None
 
                 # 控制帧率
                 elapsed = time.time() - start_time
@@ -495,19 +506,46 @@ class ScreenStreamer:
 
         return True, "实时流已停止"
 
+    def has_new_frame(self) -> bool:
+        """检查是否有新帧（自上次获取后）"""
+        with self._frame_lock:
+            return self._frame_id > self._last_fetched_id
+
     def get_frame(self) -> Optional[Image.Image]:
         """
         获取最新帧
 
         Returns:
-            PIL Image 或 None
+            PIL Image 或 None（如果没有新帧也返回缓存的图像）
         """
         with self._frame_lock:
             if self._latest_frame:
+                # 如果有缓存且帧ID没变，直接返回缓存
+                if self._cached_image is not None and self._frame_id == self._last_fetched_id:
+                    return self._cached_image
+
                 try:
-                    return Image.open(io.BytesIO(self._latest_frame))
+                    # 创建新的 Image 并缓存
+                    self._cached_image = Image.open(io.BytesIO(self._latest_frame))
+                    self._last_fetched_id = self._frame_id
+                    return self._cached_image
                 except Exception:
-                    return None
+                    return self._cached_image  # 返回旧缓存
+        return self._cached_image  # 返回旧缓存（如果有）
+
+    def get_frame_if_new(self) -> Optional[Image.Image]:
+        """
+        只有在有新帧时才返回，否则返回 None
+        用于避免 UI 重复更新同一帧
+        """
+        with self._frame_lock:
+            if self._frame_id > self._last_fetched_id and self._latest_frame:
+                try:
+                    self._cached_image = Image.open(io.BytesIO(self._latest_frame))
+                    self._last_fetched_id = self._frame_id
+                    return self._cached_image
+                except Exception:
+                    pass
         return None
 
     def get_frame_bytes(self) -> Optional[bytes]:
