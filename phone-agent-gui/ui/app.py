@@ -3278,10 +3278,19 @@ def create_app() -> gr.Blocks:
                 queue=False,
             )
 
+            # 操作后延迟刷新截图的函数
+            def delayed_refresh():
+                time.sleep(0.3)  # 等待操作生效
+                return get_stream_frame() or refresh_screenshot()
+
             # 截图点击
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
 
@@ -3290,15 +3299,27 @@ def create_app() -> gr.Blocks:
                 fn=handle_back,
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             home_btn.click(
                 fn=handle_home,
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             recent_btn.click(
                 fn=handle_recent,
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
 
@@ -3307,20 +3328,36 @@ def create_app() -> gr.Blocks:
                 fn=lambda: handle_swipe("up"),
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
 
