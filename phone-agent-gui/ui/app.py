@@ -1278,6 +1278,15 @@ def _async_tap(device_id: str, x: int, y: int):
 
 def handle_screen_click(evt: gr.SelectData) -> str:
     """处理屏幕点击事件（快速返回，不阻塞）"""
+    # 云手机模式下由 JavaScript 处理点击，跳过此处理器
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        return ""
+
+    # 检查事件数据有效性
+    if evt is None or evt.index is None:
+        return ""
+
     if not app_state.current_device:
         return "请先选择设备"
 
@@ -3220,6 +3229,7 @@ def create_app() -> gr.Blocks:
             # 静态截图模式下的点击（云手机模式下由 JavaScript 处理）
             preview_image.select(
                 fn=handle_screen_click,
+                outputs=[operation_status],
                 queue=False,
             )
 
