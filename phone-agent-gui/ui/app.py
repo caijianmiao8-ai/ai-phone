@@ -1082,8 +1082,8 @@ def handle_start_stream() -> Tuple[str, gr.update]:
     if streamer.is_running():
         streamer.stop()
 
-    # 启动流 (15fps，配合 Timer 的 10fps 刷新)
-    success, msg = streamer.start(app_state.current_device, fps=15)
+    # 启动流 (25fps)
+    success, msg = streamer.start(app_state.current_device, fps=25)
 
     if success:
         mode = streamer.get_mode()
@@ -2643,8 +2643,8 @@ def create_app() -> gr.Blocks:
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
 
-                        # 实时画面流定时器 (100ms = 10 FPS，更稳定)
-                        stream_timer = gr.Timer(value=0.1, active=False)
+                        # 实时画面流定时器 (40ms = 25 FPS)
+                        stream_timer = gr.Timer(value=0.04, active=False)
 
                         # 滑动按钮
                         with gr.Row():
