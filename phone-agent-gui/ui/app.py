@@ -1075,8 +1075,8 @@ def handle_start_stream() -> Tuple[str, gr.update]:
     if streamer.is_running():
         streamer.stop()
 
-    # 启动流 (提高帧率到15)
-    success, msg = streamer.start(app_state.current_device, fps=15)
+    # 启动流 (30fps)
+    success, msg = streamer.start(app_state.current_device, fps=30)
 
     if success:
         mode = streamer.get_mode()
@@ -1141,11 +1141,28 @@ def handle_screen_click(evt: gr.SelectData) -> Tuple[str, Optional[Image.Image]]
     # 执行点击
     success, msg = app_state.device_manager.tap(real_x, real_y, app_state.current_device)
 
-    # 等待并刷新截图
-    time.sleep(0.5)
-    screenshot = refresh_screenshot()
+    # 如果实时流正在运行，不需要手动刷新（Timer会自动更新）
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        # 实时模式：立即返回，画面会自动更新
+        return f"✅ {msg}" if success else f"❌ {msg}", gr.update()
+    else:
+        # 非实时模式：短暂等待后刷新截图
+        time.sleep(0.2)
+        screenshot = refresh_screenshot()
+        return f"✅ {msg}" if success else f"❌ {msg}", screenshot
 
-    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+
+def _get_screenshot_after_action() -> Optional[Image.Image]:
+    """操作后获取截图（实时模式下不刷新）"""
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        # 实时模式：返回 gr.update() 让 Timer 自动更新
+        return gr.update()
+    else:
+        # 非实时模式：短暂等待后刷新
+        time.sleep(0.15)
+        return refresh_screenshot()
 
 
 def handle_swipe(direction: str) -> Tuple[str, Optional[Image.Image]]:
@@ -1169,11 +1186,9 @@ def handle_swipe(direction: str) -> Tuple[str, Optional[Image.Image]]:
         return "无效的滑动方向", None
 
     x1, y1, x2, y2 = coords[direction]
-    success, msg = app_state.device_manager.swipe(x1, y1, x2, y2, 300, app_state.current_device)
+    success, msg = app_state.device_manager.swipe(x1, y1, x2, y2, 200, app_state.current_device)
 
-    time.sleep(0.5)
-    screenshot = refresh_screenshot()
-    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+    return f"✅ {msg}" if success else f"❌ {msg}", _get_screenshot_after_action()
 
 
 def handle_back() -> Tuple[str, Optional[Image.Image]]:
@@ -1181,9 +1196,7 @@ def handle_back() -> Tuple[str, Optional[Image.Image]]:
     if not app_state.current_device:
         return "请先选择设备", None
     success, msg = app_state.device_manager.press_back(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 返回" if success else f"❌ {msg}", screenshot
+    return f"✅ 返回" if success else f"❌ {msg}", _get_screenshot_after_action()
 
 
 def handle_home() -> Tuple[str, Optional[Image.Image]]:
@@ -1191,9 +1204,7 @@ def handle_home() -> Tuple[str, Optional[Image.Image]]:
     if not app_state.current_device:
         return "请先选择设备", None
     success, msg = app_state.device_manager.press_home(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 主页" if success else f"❌ {msg}", screenshot
+    return f"✅ 主页" if success else f"❌ {msg}", _get_screenshot_after_action()
 
 
 def handle_recent() -> Tuple[str, Optional[Image.Image]]:
@@ -1201,9 +1212,7 @@ def handle_recent() -> Tuple[str, Optional[Image.Image]]:
     if not app_state.current_device:
         return "请先选择设备", None
     success, msg = app_state.device_manager.press_recent(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 最近任务" if success else f"❌ {msg}", screenshot
+    return f"✅ 最近任务" if success else f"❌ {msg}", _get_screenshot_after_action()
 
 
 def handle_input_text(text: str) -> Tuple[str, Optional[Image.Image]]:
@@ -1214,9 +1223,7 @@ def handle_input_text(text: str) -> Tuple[str, Optional[Image.Image]]:
         return "请输入文本", None
 
     success, msg = app_state.device_manager.input_text(text, app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+    return f"✅ {msg}" if success else f"❌ {msg}", _get_screenshot_after_action()
 
 
 def handle_enter() -> Tuple[str, Optional[Image.Image]]:
@@ -1224,9 +1231,7 @@ def handle_enter() -> Tuple[str, Optional[Image.Image]]:
     if not app_state.current_device:
         return "请先选择设备", None
     success, msg = app_state.device_manager.press_enter(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 回车" if success else f"❌ {msg}", screenshot
+    return f"✅ 回车" if success else f"❌ {msg}", _get_screenshot_after_action()
 
 
 # ADB键盘下载地址
@@ -2652,8 +2657,8 @@ def create_app() -> gr.Blocks:
                             home_btn = gr.Button("🏠 主页")
                             recent_btn = gr.Button("📋 最近")
 
-                        # 实时画面流定时器 (100ms = 10 FPS)
-                        stream_timer = gr.Timer(value=0.1, active=False)
+                        # 实时画面流定时器 (33ms ≈ 30 FPS)
+                        stream_timer = gr.Timer(value=0.033, active=False)
 
                         # 滑动按钮
                         with gr.Row():
