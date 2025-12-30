@@ -3097,68 +3097,58 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status, stream_timer],
             )
 
-            # 屏幕点击（不进队列，立即执行）
+            # 屏幕点击（无输出，避免阻塞刷新）
             preview_image.select(
                 fn=handle_screen_click,
-                outputs=[operation_status],
                 queue=False,
             )
 
-            # 导航按钮（不进队列，立即执行）
+            # 导航按钮（无输出，避免阻塞刷新）
             back_btn.click(
                 fn=handle_back,
-                outputs=[operation_status],
                 queue=False,
             )
 
             home_btn.click(
                 fn=handle_home,
-                outputs=[operation_status],
                 queue=False,
             )
 
             recent_btn.click(
                 fn=handle_recent,
-                outputs=[operation_status],
                 queue=False,
             )
 
-            # 滑动操作（不进队列，立即执行）
+            # 滑动操作（无输出，避免阻塞刷新）
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
-                outputs=[operation_status],
                 queue=False,
             )
 
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
-                outputs=[operation_status],
                 queue=False,
             )
 
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
-                outputs=[operation_status],
                 queue=False,
             )
 
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
-                outputs=[operation_status],
                 queue=False,
             )
 
-            # 文本输入（不进队列，立即执行）
+            # 文本输入（无输出，避免阻塞刷新）
             send_text_btn.click(
                 fn=handle_input_text,
                 inputs=[text_input],
-                outputs=[operation_status],
                 queue=False,
             )
 
             enter_btn.click(
                 fn=handle_enter,
-                outputs=[operation_status],
                 queue=False,
             )
 
