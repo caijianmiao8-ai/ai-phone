@@ -1100,8 +1100,9 @@ def handle_stop_stream() -> Tuple[str, gr.update]:
 
 # ==================== 屏幕操作功能 ====================
 
-# 存储屏幕尺寸用于坐标转换
+# 存储屏幕尺寸和图片尺寸缓存
 _screen_size_cache = {}
+_image_size_cache = {}  # 缓存图片尺寸，避免重复解析
 
 
 def _get_screen_size() -> Tuple[int, int]:
@@ -1114,38 +1115,73 @@ def _get_screen_size() -> Tuple[int, int]:
     return _screen_size_cache[app_state.current_device]
 
 
+def _get_image_size() -> Tuple[int, int]:
+    """获取当前截图的尺寸（带缓存）"""
+    if not app_state.current_screenshot:
+        return 1080, 1920
+
+    # 用截图数据长度作为缓存 key
+    cache_key = len(app_state.current_screenshot)
+    if cache_key in _image_size_cache:
+        return _image_size_cache[cache_key]
+
+    try:
+        img = Image.open(io.BytesIO(app_state.current_screenshot))
+        size = img.size
+        # 只保留最近一个缓存
+        _image_size_cache.clear()
+        _image_size_cache[cache_key] = size
+        return size
+    except Exception:
+        return 1080, 1920
+
+
+def _async_tap(device_id: str, x: int, y: int):
+    """异步执行点击（在后台线程中）"""
+    def do_tap():
+        try:
+            app_state.device_manager.tap(x, y, device_id)
+        except Exception:
+            pass
+    threading.Thread(target=do_tap, daemon=True).start()
+
+
 def handle_screen_click(evt: gr.SelectData) -> str:
-    """处理屏幕点击事件"""
+    """处理屏幕点击事件（快速返回，不阻塞）"""
     if not app_state.current_device:
         return "请先选择设备"
 
-    # 获取点击坐标（Gradio 返回的是图片上的坐标）
+    # 获取点击坐标
     x, y = evt.index
 
-    # 获取实际屏幕尺寸进行坐标转换
+    # 获取屏幕和图片尺寸
     screen_w, screen_h = _get_screen_size()
+    img_w, img_h = _get_image_size()
 
-    # 获取当前截图的实际显示尺寸
-    if app_state.current_screenshot:
-        img = Image.open(io.BytesIO(app_state.current_screenshot))
-        img_w, img_h = img.size
-        # 计算缩放比例
-        scale_x = screen_w / img_w
-        scale_y = screen_h / img_h
-        # 转换坐标
-        real_x = int(x * scale_x)
-        real_y = int(y * scale_y)
-    else:
-        real_x, real_y = x, y
+    # 计算缩放比例并转换坐标
+    scale_x = screen_w / img_w
+    scale_y = screen_h / img_h
+    real_x = int(x * scale_x)
+    real_y = int(y * scale_y)
 
-    # 执行点击（不阻塞，让 Timer 自动更新画面）
-    success, msg = app_state.device_manager.tap(real_x, real_y, app_state.current_device)
+    # 异步执行点击，立即返回
+    _async_tap(app_state.current_device, real_x, real_y)
 
-    return f"✅ {msg}" if success else f"❌ {msg}"
+    return f"✅ 点击 ({real_x}, {real_y})"
+
+
+def _async_command(func, *args):
+    """异步执行设备命令（在后台线程中）"""
+    def run():
+        try:
+            func(*args)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
 
 
 def handle_swipe(direction: str) -> str:
-    """处理滑动操作"""
+    """处理滑动操作（异步）"""
     if not app_state.current_device:
         return "请先选择设备"
 
@@ -1165,33 +1201,38 @@ def handle_swipe(direction: str) -> str:
         return "无效的滑动方向"
 
     x1, y1, x2, y2 = coords[direction]
-    success, msg = app_state.device_manager.swipe(x1, y1, x2, y2, 200, app_state.current_device)
+    # 异步执行滑动
+    _async_command(
+        app_state.device_manager.swipe,
+        x1, y1, x2, y2, 200, app_state.current_device
+    )
 
-    return f"✅ {msg}" if success else f"❌ {msg}"
+    direction_names = {"up": "上滑", "down": "下滑", "left": "左滑", "right": "右滑"}
+    return f"✅ {direction_names.get(direction, direction)}"
 
 
 def handle_back() -> str:
-    """返回键"""
+    """返回键（异步）"""
     if not app_state.current_device:
         return "请先选择设备"
-    success, msg = app_state.device_manager.press_back(app_state.current_device)
-    return f"✅ 返回" if success else f"❌ {msg}"
+    _async_command(app_state.device_manager.press_back, app_state.current_device)
+    return "✅ 返回"
 
 
 def handle_home() -> str:
-    """主页键"""
+    """主页键（异步）"""
     if not app_state.current_device:
         return "请先选择设备"
-    success, msg = app_state.device_manager.press_home(app_state.current_device)
-    return f"✅ 主页" if success else f"❌ {msg}"
+    _async_command(app_state.device_manager.press_home, app_state.current_device)
+    return "✅ 主页"
 
 
 def handle_recent() -> str:
-    """最近任务"""
+    """最近任务（异步）"""
     if not app_state.current_device:
         return "请先选择设备"
-    success, msg = app_state.device_manager.press_recent(app_state.current_device)
-    return f"✅ 最近任务" if success else f"❌ {msg}"
+    _async_command(app_state.device_manager.press_recent, app_state.current_device)
+    return "✅ 最近任务"
 
 
 def handle_input_text(text: str) -> str:
