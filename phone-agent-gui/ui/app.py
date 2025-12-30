@@ -28,6 +28,8 @@ from core.task_history import TaskHistoryManager, TaskExecutionRecord
 from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, PlanStatus
 from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
 from core.task_analyzer import TaskAnalyzer, AnalysisResult
+from core.screen_stream import get_screen_streamer, ScreenStreamer
+from core.mjpeg_server import get_mjpeg_server, set_operation_callback
 
 
 # 配置 Gradio 缓存目录
@@ -1038,10 +1040,242 @@ def refresh_screenshot() -> Optional[Image.Image]:
     return None
 
 
+# ==================== 实时画面流功能 ====================
+
+
+def _generate_cloud_phone_html(stream_url: str, api_base: str) -> str:
+    """
+    生成云手机界面 HTML
+
+    视频流直接由浏览器渲染，操作通过 fetch API 发送
+    完全绕过 Gradio 的事件系统
+    """
+    return f'''
+<div id="cloud-phone" style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+    <div id="phone-container" style="position:relative; width:360px; height:640px; background:#1a1a1a; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+        <div id="loading-indicator" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#888; text-align:center; z-index:10;">
+            <div style="font-size:24px; margin-bottom:10px;">⏳</div>
+            <div>正在连接视频流...</div>
+        </div>
+        <img id="phone-stream" src="{stream_url}"
+             style="width:100%; height:100%; object-fit:contain; opacity:0; transition:opacity 0.3s;"
+             crossorigin="anonymous" />
+        <div id="phone-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; cursor:pointer; z-index:20;"
+             onmousedown="handleMouseDown(event)"
+             onmouseup="handleMouseUp(event)"
+             onmousemove="handleMouseMove(event)"></div>
+        <div id="phone-touch" style="position:absolute; width:30px; height:30px; border-radius:50%;
+             background:rgba(255,255,255,0.5); pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:25;"></div>
+    </div>
+    <div style="display:flex; gap:8px;">
+        <button onclick="sendOp('back')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">◀ 返回</button>
+        <button onclick="sendOp('home')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">⚫ 主页</button>
+        <button onclick="sendOp('recent')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">☰ 最近</button>
+    </div>
+</div>
+<script>
+(function() {{
+    const API = "{api_base}";
+    const STREAM_URL = "{stream_url}";
+    const overlay = document.getElementById('phone-overlay');
+    const touch = document.getElementById('phone-touch');
+    const streamImg = document.getElementById('phone-stream');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    let startX, startY, startTime, isDragging = false;
+    let streamLoaded = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 10;
+
+    // 监听图像加载
+    streamImg.onload = function() {{
+        if (!streamLoaded) {{
+            streamLoaded = true;
+            loadingIndicator.style.display = 'none';
+            streamImg.style.opacity = '1';
+            console.log('云手机视频流已连接');
+        }}
+    }};
+
+    streamImg.onerror = function() {{
+        if (retryCount < MAX_RETRIES) {{
+            retryCount++;
+            loadingIndicator.innerHTML = '<div style="font-size:24px; margin-bottom:10px;">🔄</div><div>重试连接中... (' + retryCount + '/' + MAX_RETRIES + ')</div>';
+            // 重试连接
+            setTimeout(function() {{
+                streamImg.src = STREAM_URL + '?t=' + Date.now();
+            }}, 1000);
+        }} else {{
+            loadingIndicator.innerHTML = '<div style="font-size:24px; margin-bottom:10px;">❌</div><div>连接失败，请重试</div>';
+        }}
+    }};
+
+    function getRelPos(e) {{
+        const rect = overlay.getBoundingClientRect();
+        return {{
+            x: (e.clientX - rect.left) / rect.width,
+            y: (e.clientY - rect.top) / rect.height
+        }};
+    }}
+
+    window.handleMouseDown = function(e) {{
+        const pos = getRelPos(e);
+        startX = pos.x; startY = pos.y;
+        startTime = Date.now();
+        isDragging = true;
+        touch.style.left = e.clientX - overlay.getBoundingClientRect().left + 'px';
+        touch.style.top = e.clientY - overlay.getBoundingClientRect().top + 'px';
+        touch.style.display = 'block';
+    }};
+
+    window.handleMouseMove = function(e) {{
+        if (!isDragging) return;
+        touch.style.left = e.clientX - overlay.getBoundingClientRect().left + 'px';
+        touch.style.top = e.clientY - overlay.getBoundingClientRect().top + 'px';
+    }};
+
+    window.handleMouseUp = function(e) {{
+        if (!isDragging) return;
+        isDragging = false;
+        touch.style.display = 'none';
+
+        const pos = getRelPos(e);
+        const dx = pos.x - startX;
+        const dy = pos.y - startY;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const duration = Date.now() - startTime;
+
+        if (dist < 0.03 && duration < 300) {{
+            // 点击
+            fetch(API + '/tap', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{x: startX, y: startY}})
+            }});
+        }} else if (dist > 0.05) {{
+            // 滑动
+            fetch(API + '/swipe', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{x1: startX, y1: startY, x2: pos.x, y2: pos.y, duration: Math.min(duration, 500)}})
+            }});
+        }}
+    }};
+
+    window.sendOp = function(op) {{
+        fetch(API + '/' + op, {{method: 'POST'}});
+    }};
+}})();
+</script>
+'''
+
+
+def _handle_device_operation(op_type: str, data: dict):
+    """处理来自 MJPEG 服务器的操作请求"""
+    if not app_state.current_device:
+        print(f"[云手机] 操作失败: 未选择设备")
+        return
+
+    screen_w, screen_h = _get_screen_size()
+    print(f"[云手机] 收到操作: {op_type}, 数据: {data}, 屏幕: {screen_w}x{screen_h}")
+
+    if op_type == 'tap':
+        x = int(data.get('x', 0.5) * screen_w)
+        y = int(data.get('y', 0.5) * screen_h)
+        print(f"[云手机] 执行点击: ({x}, {y})")
+        app_state.device_manager.tap(x, y, app_state.current_device)
+
+    elif op_type == 'swipe':
+        x1 = int(data.get('x1', 0.5) * screen_w)
+        y1 = int(data.get('y1', 0.5) * screen_h)
+        x2 = int(data.get('x2', 0.5) * screen_w)
+        y2 = int(data.get('y2', 0.5) * screen_h)
+        duration = int(data.get('duration', 300))
+        app_state.device_manager.swipe(x1, y1, x2, y2, duration, app_state.current_device)
+
+    elif op_type == 'back':
+        app_state.device_manager.press_back(app_state.current_device)
+
+    elif op_type == 'home':
+        app_state.device_manager.press_home(app_state.current_device)
+
+    elif op_type == 'recent':
+        app_state.device_manager.press_recent(app_state.current_device)
+
+
+# 注册操作回调
+set_operation_callback(_handle_device_operation)
+
+
+def _generate_stream_html(stream_url: str) -> str:
+    """生成独立的 MJPEG 视频流 HTML（不包含 JavaScript 点击处理）"""
+    return f'''
+<div style="display:flex; justify-content:center;">
+    <img src="{stream_url}"
+         style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2);"
+         onerror="this.style.opacity='0.5'"
+         onload="this.style.opacity='1'" />
+</div>
+'''
+
+
+def handle_start_stream() -> Tuple[str, str, gr.update]:
+    """
+    启动实时模式 - 使用独立的 MJPEG 流
+
+    返回: (状态消息, 流HTML, preview_image可见性)
+    """
+    if not app_state.current_device:
+        return "❌ 请先选择设备", "", gr.update()
+
+    streamer = get_screen_streamer()
+    mjpeg = get_mjpeg_server()
+
+    # 如果已经在运行，先停止
+    if streamer.is_running():
+        streamer.stop()
+        time.sleep(0.1)
+
+    # 启动 MJPEG 服务器
+    if not mjpeg.is_running():
+        if not mjpeg.start():
+            return "❌ MJPEG 服务器启动失败", "", gr.update()
+
+    # 启动截图流（使用截图模式，最可靠，不依赖 ffmpeg）
+    success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
+
+    if success:
+        stream_url = mjpeg.get_stream_url()
+        html = _generate_stream_html(stream_url)
+        mode = streamer.get_mode()
+        return f"✅ 实时已启动 ({mode})", html, gr.update(visible=False)
+
+    return f"❌ {msg}", "", gr.update()
+
+
+def handle_stop_stream() -> Tuple[str, str, gr.update]:
+    """停止实时模式"""
+    streamer = get_screen_streamer()
+
+    if not streamer.is_running():
+        return "ℹ️ 未启动", "", gr.update(visible=True)
+
+    success, msg = streamer.stop()
+    return f"✅ {msg}" if success else f"❌ {msg}", "", gr.update(visible=True)
+
+
+def get_stream_frame() -> Optional[Image.Image]:
+    """获取实时帧（供 Timer 调用）"""
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        return streamer.get_frame()
+    return None
+
+
 # ==================== 屏幕操作功能 ====================
 
-# 存储屏幕尺寸用于坐标转换
+# 存储屏幕尺寸和图片尺寸缓存
 _screen_size_cache = {}
+_image_size_cache = {}  # 缓存图片尺寸，避免重复解析
 
 
 def _get_screen_size() -> Tuple[int, int]:
@@ -1054,44 +1288,79 @@ def _get_screen_size() -> Tuple[int, int]:
     return _screen_size_cache[app_state.current_device]
 
 
-def handle_screen_click(evt: gr.SelectData) -> Tuple[str, Optional[Image.Image]]:
-    """处理屏幕点击事件"""
-    if not app_state.current_device:
-        return "请先选择设备", None
+def _get_image_size() -> Tuple[int, int]:
+    """获取当前截图的尺寸（带缓存）"""
+    if not app_state.current_screenshot:
+        return 1080, 1920
 
-    # 获取点击坐标（Gradio 返回的是图片上的坐标）
+    # 用截图数据长度作为缓存 key
+    cache_key = len(app_state.current_screenshot)
+    if cache_key in _image_size_cache:
+        return _image_size_cache[cache_key]
+
+    try:
+        img = Image.open(io.BytesIO(app_state.current_screenshot))
+        size = img.size
+        # 只保留最近一个缓存
+        _image_size_cache.clear()
+        _image_size_cache[cache_key] = size
+        return size
+    except Exception:
+        return 1080, 1920
+
+
+def _async_tap(device_id: str, x: int, y: int):
+    """异步执行点击（在后台线程中）"""
+    def do_tap():
+        try:
+            app_state.device_manager.tap(x, y, device_id)
+        except Exception:
+            pass
+    threading.Thread(target=do_tap, daemon=True).start()
+
+
+def handle_screen_click(evt: gr.SelectData) -> str:
+    """处理屏幕点击事件（快速返回，不阻塞）"""
+    # 检查事件数据有效性
+    if evt is None or evt.index is None:
+        return ""
+
+    if not app_state.current_device:
+        return "请先选择设备"
+
+    # 获取点击坐标
     x, y = evt.index
 
-    # 获取实际屏幕尺寸进行坐标转换
+    # 获取屏幕和图片尺寸
     screen_w, screen_h = _get_screen_size()
+    img_w, img_h = _get_image_size()
 
-    # 获取当前截图的实际显示尺寸
-    if app_state.current_screenshot:
-        img = Image.open(io.BytesIO(app_state.current_screenshot))
-        img_w, img_h = img.size
-        # 计算缩放比例
-        scale_x = screen_w / img_w
-        scale_y = screen_h / img_h
-        # 转换坐标
-        real_x = int(x * scale_x)
-        real_y = int(y * scale_y)
-    else:
-        real_x, real_y = x, y
+    # 计算缩放比例并转换坐标
+    scale_x = screen_w / img_w
+    scale_y = screen_h / img_h
+    real_x = int(x * scale_x)
+    real_y = int(y * scale_y)
 
-    # 执行点击
-    success, msg = app_state.device_manager.tap(real_x, real_y, app_state.current_device)
+    # 异步执行点击，立即返回
+    _async_tap(app_state.current_device, real_x, real_y)
 
-    # 等待并刷新截图
-    time.sleep(0.5)
-    screenshot = refresh_screenshot()
-
-    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+    return f"✅ 点击 ({real_x}, {real_y})"
 
 
-def handle_swipe(direction: str) -> Tuple[str, Optional[Image.Image]]:
-    """处理滑动操作"""
+def _async_command(func, *args):
+    """异步执行设备命令（在后台线程中）"""
+    def run():
+        try:
+            func(*args)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+def handle_swipe(direction: str) -> str:
+    """处理滑动操作（异步）"""
     if not app_state.current_device:
-        return "请先选择设备", None
+        return "请先选择设备"
 
     screen_w, screen_h = _get_screen_size()
     cx, cy = screen_w // 2, screen_h // 2
@@ -1106,67 +1375,61 @@ def handle_swipe(direction: str) -> Tuple[str, Optional[Image.Image]]:
     }
 
     if direction not in coords:
-        return "无效的滑动方向", None
+        return "无效的滑动方向"
 
     x1, y1, x2, y2 = coords[direction]
-    success, msg = app_state.device_manager.swipe(x1, y1, x2, y2, 300, app_state.current_device)
+    # 异步执行滑动
+    _async_command(
+        app_state.device_manager.swipe,
+        x1, y1, x2, y2, 200, app_state.current_device
+    )
 
-    time.sleep(0.5)
-    screenshot = refresh_screenshot()
-    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+    direction_names = {"up": "上滑", "down": "下滑", "left": "左滑", "right": "右滑"}
+    return f"✅ {direction_names.get(direction, direction)}"
 
 
-def handle_back() -> Tuple[str, Optional[Image.Image]]:
-    """返回键"""
+def handle_back() -> str:
+    """返回键（异步）"""
     if not app_state.current_device:
-        return "请先选择设备", None
-    success, msg = app_state.device_manager.press_back(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 返回" if success else f"❌ {msg}", screenshot
+        return "请先选择设备"
+    _async_command(app_state.device_manager.press_back, app_state.current_device)
+    return "✅ 返回"
 
 
-def handle_home() -> Tuple[str, Optional[Image.Image]]:
-    """主页键"""
+def handle_home() -> str:
+    """主页键（异步）"""
     if not app_state.current_device:
-        return "请先选择设备", None
-    success, msg = app_state.device_manager.press_home(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 主页" if success else f"❌ {msg}", screenshot
+        return "请先选择设备"
+    _async_command(app_state.device_manager.press_home, app_state.current_device)
+    return "✅ 主页"
 
 
-def handle_recent() -> Tuple[str, Optional[Image.Image]]:
-    """最近任务"""
+def handle_recent() -> str:
+    """最近任务（异步）"""
     if not app_state.current_device:
-        return "请先选择设备", None
-    success, msg = app_state.device_manager.press_recent(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 最近任务" if success else f"❌ {msg}", screenshot
+        return "请先选择设备"
+    _async_command(app_state.device_manager.press_recent, app_state.current_device)
+    return "✅ 最近任务"
 
 
-def handle_input_text(text: str) -> Tuple[str, Optional[Image.Image]]:
-    """输入文本"""
+def handle_input_text(text: str) -> str:
+    """输入文本（异步）"""
     if not app_state.current_device:
-        return "请先选择设备", None
+        return "请先选择设备"
     if not text:
-        return "请输入文本", None
+        return "请输入文本"
 
-    success, msg = app_state.device_manager.input_text(text, app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ {msg}" if success else f"❌ {msg}", screenshot
+    # 异步执行文本输入
+    _async_command(app_state.device_manager.input_text, text, app_state.current_device)
+    return f"✅ 发送: {text[:20]}{'...' if len(text) > 20 else ''}"
 
 
-def handle_enter() -> Tuple[str, Optional[Image.Image]]:
-    """回车键"""
+def handle_enter() -> str:
+    """回车键（异步）"""
     if not app_state.current_device:
-        return "请先选择设备", None
-    success, msg = app_state.device_manager.press_enter(app_state.current_device)
-    time.sleep(0.3)
-    screenshot = refresh_screenshot()
-    return f"✅ 回车" if success else f"❌ {msg}", screenshot
+        return "请先选择设备"
+    _async_command(app_state.device_manager.press_enter, app_state.current_device)
+    return "✅ 回车"
 
 
 # ADB键盘下载地址
@@ -1195,6 +1458,41 @@ def handle_enable_adb_keyboard() -> str:
         return "请先选择设备"
 
     success, msg = app_state.device_manager.enable_adb_keyboard(app_state.current_device)
+    return f"✅ {msg}" if success else f"❌ {msg}"
+
+
+# ==================== scrcpy 投屏功能 ====================
+
+def handle_start_scrcpy() -> str:
+    """启动 scrcpy 投屏"""
+    if not app_state.current_device:
+        return "❌ 请先选择设备"
+
+    # 检查 scrcpy 是否可用
+    available, path = app_state.device_manager.is_scrcpy_available()
+    if not available:
+        return "❌ scrcpy 未安装\n\n请下载安装: https://github.com/Genymobile/scrcpy/releases"
+
+    # 启动投屏
+    success, msg = app_state.device_manager.start_scrcpy(
+        app_state.current_device,
+        options={
+            "stay_awake": True,
+            "show_touches": True,
+        }
+    )
+
+    if success:
+        return f"✅ {msg}\n\n投屏窗口已打开，可直接在窗口中操作手机"
+    return f"❌ {msg}"
+
+
+def handle_stop_scrcpy() -> str:
+    """停止 scrcpy 投屏"""
+    if not app_state.current_device:
+        return "❌ 请先选择设备"
+
+    success, msg = app_state.device_manager.stop_scrcpy(app_state.current_device)
     return f"✅ {msg}" if success else f"❌ {msg}"
 
 
@@ -2540,27 +2838,39 @@ def create_app() -> gr.Blocks:
                     # ===== 右侧：屏幕操作 =====
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
+
+                        # MJPEG 实时流（独立于 Gradio 事件系统）
+                        stream_html = gr.HTML(value="", label="实时画面")
+
+                        # 静态截图预览（用于点击操作）
                         preview_image = gr.Image(
-                            label="点击屏幕直接操作",
+                            label="屏幕预览（点击操作）",
                             type="pil",
                             height=480,
                             interactive=True,
                         )
+
+
                         operation_status = gr.Textbox(label="", interactive=False, lines=1)
+
+                        # 控制按钮
+                        with gr.Row():
+                            refresh_btn = gr.Button("🔄 截图")
+                            start_stream_btn = gr.Button("▶️ 实时", variant="primary")
+                            stop_stream_btn = gr.Button("⏹️ 停止")
 
                         # 导航按钮
                         with gr.Row():
-                            refresh_btn = gr.Button("🔄 刷新")
                             back_btn = gr.Button("◀ 返回")
-                            home_btn = gr.Button("🏠 主页")
-                            recent_btn = gr.Button("📋 最近")
+                            home_btn = gr.Button("⚫ 主页")
+                            recent_btn = gr.Button("☰ 最近")
 
                         # 滑动按钮
                         with gr.Row():
-                            swipe_up_btn = gr.Button("⬆ 上滑")
-                            swipe_down_btn = gr.Button("⬇ 下滑")
-                            swipe_left_btn = gr.Button("⬅ 左滑")
-                            swipe_right_btn = gr.Button("➡ 右滑")
+                            swipe_up_btn = gr.Button("⬆️ 上滑")
+                            swipe_down_btn = gr.Button("⬇️ 下滑")
+                            swipe_left_btn = gr.Button("⬅️ 左滑")
+                            swipe_right_btn = gr.Button("➡️ 右滑")
 
                         # 文本输入
                         with gr.Row():
@@ -2572,6 +2882,9 @@ def create_app() -> gr.Blocks:
                         with gr.Accordion("🔧 快捷工具", open=False):
                             with gr.Row():
                                 with gr.Column():
+                                    gr.Markdown("**📺 实时投屏 (scrcpy)**")
+                                    start_scrcpy_btn = gr.Button("▶️ 启动投屏", variant="primary")
+                                    stop_scrcpy_btn = gr.Button("⏹️ 停止投屏")
                                     gr.Markdown("**ADB键盘 (中文输入)**")
                                     install_adb_kb_btn = gr.Button("📥 检查/安装")
                                     enable_adb_kb_btn = gr.Button("✅ 启用")
@@ -2952,63 +3265,129 @@ def create_app() -> gr.Blocks:
             refresh_btn.click(
                 fn=refresh_screenshot,
                 outputs=[preview_image],
+                queue=False,
             )
 
+            # 实时模式控制（MJPEG 流独立于 Gradio）
+            start_stream_btn.click(
+                fn=handle_start_stream,
+                outputs=[operation_status, stream_html, preview_image],
+                queue=False,
+            )
+
+            stop_stream_btn.click(
+                fn=handle_stop_stream,
+                outputs=[operation_status, stream_html, preview_image],
+                queue=False,
+            )
+
+            # 操作后延迟刷新截图的函数
+            def delayed_refresh():
+                time.sleep(0.3)  # 等待操作生效
+                return get_stream_frame() or refresh_screenshot()
+
+            # 截图点击
             preview_image.select(
                 fn=handle_screen_click,
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
 
             # 导航按钮
             back_btn.click(
                 fn=handle_back,
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
-
             home_btn.click(
                 fn=handle_home,
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
-
             recent_btn.click(
                 fn=handle_recent,
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
 
-            # 滑动操作
+            # 滑动按钮
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
-
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
-
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
-
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
-                outputs=[operation_status, preview_image],
+                outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=delayed_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
 
             # 文本输入
             send_text_btn.click(
                 fn=handle_input_text,
                 inputs=[text_input],
-                outputs=[operation_status, preview_image],
+                queue=False,
             )
 
             enter_btn.click(
                 fn=handle_enter,
-                outputs=[operation_status, preview_image],
+                queue=False,
             )
 
-            # 快捷工具
+            # 快捷工具 - scrcpy 投屏
+            start_scrcpy_btn.click(
+                fn=handle_start_scrcpy,
+                outputs=[tool_status],
+            )
+
+            stop_scrcpy_btn.click(
+                fn=handle_stop_scrcpy,
+                outputs=[tool_status],
+            )
+
+            # 快捷工具 - ADB键盘
             install_adb_kb_btn.click(
                 fn=handle_install_adb_keyboard,
                 outputs=[tool_status],

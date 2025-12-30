@@ -293,6 +293,8 @@ class ActionHandler:
                                 hdc_prefix + ["shell", "input", "keyevent", keycode],
                                 capture_output=True,
                                 text=True,
+                                encoding="utf-8",
+                                errors="replace",
                             )
                     else:
                         # Assume it's a numeric code
@@ -307,6 +309,8 @@ class ActionHandler:
                         hdc_prefix + ["shell", "input", "keyevent", keycode],
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                     )
         else:
             # ADB devices use standard input keyevent command
@@ -315,6 +319,8 @@ class ActionHandler:
                 cmd_prefix + ["shell", "input", "keyevent", keycode],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
     @staticmethod
@@ -342,6 +348,53 @@ def parse_action(response: str) -> dict[str, Any]:
     Raises:
         ValueError: If the response cannot be parsed.
     """
+    # All supported direct action names (for fallback parsing)
+    DIRECT_ACTION_NAMES = [
+        "Wait", "Tap", "Swipe", "Type", "Type_Name", "Launch",
+        "Back", "Home", "Long Press", "Double Tap", "Take_over",
+        "Note", "Call_API", "Interact"
+    ]
+
+    def convert_direct_action(action_name: str, args_str: str) -> str:
+        """Convert direct action call to do(action=...) format."""
+        if args_str.strip():
+            return f'do(action="{action_name}", {args_str})'
+        else:
+            return f'do(action="{action_name}")'
+
+    def find_and_convert_direct_action(text: str) -> str | None:
+        """Find direct action call in text and convert to do() format."""
+        for action_name in DIRECT_ACTION_NAMES:
+            pattern = rf'\b{re.escape(action_name)}\s*\('
+            match = re.search(pattern, text)
+            if match:
+                # Extract arguments
+                remaining = text[match.end():]
+                paren_count = 1
+                end_pos = 0
+                in_string = False
+                string_char = None
+
+                for i, char in enumerate(remaining):
+                    if in_string:
+                        if char == string_char and (i == 0 or remaining[i-1] != '\\'):
+                            in_string = False
+                    elif char in ('"', "'"):
+                        in_string = True
+                        string_char = char
+                    elif char == '(':
+                        paren_count += 1
+                    elif char == ')':
+                        paren_count -= 1
+                        if paren_count == 0:
+                            end_pos = i
+                            break
+
+                if end_pos > 0:
+                    args_str = remaining[:end_pos]
+                    return convert_direct_action(action_name, args_str)
+        return None
+
     print(f"Parsing action: {response}")
     try:
         response = response.strip()
@@ -434,6 +487,12 @@ def parse_action(response: str) -> dict[str, Any]:
                 "message": response.replace("finish(message=", "")[1:-2],
             }
         else:
+            # Fallback: try to find direct action call in the response
+            # This handles cases like "some text... Wait(duration="10 seconds")"
+            converted = find_and_convert_direct_action(response)
+            if converted:
+                # Recursively parse the converted action
+                return parse_action(converted)
             raise ValueError(f"Failed to parse action: {response}")
         return action
     except Exception as e:
