@@ -29,6 +29,7 @@ from core.task_plan import TaskPlanManager, TaskPlan, TaskStep, StepStatus, Plan
 from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
 from core.task_analyzer import TaskAnalyzer, AnalysisResult
 from core.screen_stream import get_screen_streamer, ScreenStreamer
+from core.mjpeg_server import get_mjpeg_server, set_operation_callback
 
 
 # 配置 Gradio 缓存目录
@@ -1042,35 +1043,149 @@ def refresh_screenshot() -> Optional[Image.Image]:
 # ==================== 实时画面流功能 ====================
 
 
-def auto_refresh_tick() -> Optional[Image.Image]:
+def _generate_cloud_phone_html(stream_url: str, api_base: str) -> str:
     """
-    自动刷新回调 - 返回当前帧
+    生成云手机界面 HTML
 
-    由 Image 组件的 every 参数调用
+    视频流直接由浏览器渲染，操作通过 fetch API 发送
+    完全绕过 Gradio 的事件系统
     """
-    streamer = get_screen_streamer()
+    return f'''
+<div id="cloud-phone" style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+    <div style="position:relative; width:360px; height:640px; background:#000; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+        <img id="phone-stream" src="{stream_url}"
+             style="width:100%; height:100%; object-fit:contain;"
+             onerror="this.style.opacity='0.3'"
+             onload="this.style.opacity='1'" />
+        <div id="phone-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; cursor:pointer;"
+             onmousedown="handleMouseDown(event)"
+             onmouseup="handleMouseUp(event)"
+             onmousemove="handleMouseMove(event)"></div>
+        <div id="phone-touch" style="position:absolute; width:30px; height:30px; border-radius:50%;
+             background:rgba(255,255,255,0.5); pointer-events:none; display:none; transform:translate(-50%,-50%);"></div>
+    </div>
+    <div style="display:flex; gap:8px;">
+        <button onclick="sendOp('back')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">◀ 返回</button>
+        <button onclick="sendOp('home')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">⚫ 主页</button>
+        <button onclick="sendOp('recent')" style="padding:8px 16px; border-radius:6px; border:1px solid #555; background:#333; color:#fff; cursor:pointer;">☰ 最近</button>
+    </div>
+</div>
+<script>
+(function() {{
+    const API = "{api_base}";
+    const overlay = document.getElementById('phone-overlay');
+    const touch = document.getElementById('phone-touch');
+    let startX, startY, startTime, isDragging = false;
 
-    if streamer.is_running():
-        frame = streamer.get_frame_if_new()
-        if frame:
-            frame_bytes = streamer.get_frame_bytes()
-            if frame_bytes:
-                app_state.current_screenshot = frame_bytes
-            return frame
-        # 没有新帧时返回缓存的图片
-        cached = streamer._cached_image
-        if cached:
-            return cached
+    function getRelPos(e) {{
+        const rect = overlay.getBoundingClientRect();
+        return {{
+            x: (e.clientX - rect.left) / rect.width,
+            y: (e.clientY - rect.top) / rect.height
+        }};
+    }}
 
-    return None
+    window.handleMouseDown = function(e) {{
+        const pos = getRelPos(e);
+        startX = pos.x; startY = pos.y;
+        startTime = Date.now();
+        isDragging = true;
+        touch.style.left = e.clientX - overlay.getBoundingClientRect().left + 'px';
+        touch.style.top = e.clientY - overlay.getBoundingClientRect().top + 'px';
+        touch.style.display = 'block';
+    }};
+
+    window.handleMouseMove = function(e) {{
+        if (!isDragging) return;
+        touch.style.left = e.clientX - overlay.getBoundingClientRect().left + 'px';
+        touch.style.top = e.clientY - overlay.getBoundingClientRect().top + 'px';
+    }};
+
+    window.handleMouseUp = function(e) {{
+        if (!isDragging) return;
+        isDragging = false;
+        touch.style.display = 'none';
+
+        const pos = getRelPos(e);
+        const dx = pos.x - startX;
+        const dy = pos.y - startY;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const duration = Date.now() - startTime;
+
+        if (dist < 0.03 && duration < 300) {{
+            // 点击
+            fetch(API + '/tap', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{x: startX, y: startY}})
+            }});
+        }} else if (dist > 0.05) {{
+            // 滑动
+            fetch(API + '/swipe', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{x1: startX, y1: startY, x2: pos.x, y2: pos.y, duration: Math.min(duration, 500)}})
+            }});
+        }}
+    }};
+
+    window.sendOp = function(op) {{
+        fetch(API + '/' + op, {{method: 'POST'}});
+    }};
+}})();
+</script>
+'''
 
 
-def handle_start_stream() -> Tuple[str, gr.update]:
-    """启动实时画面流"""
+def _handle_device_operation(op_type: str, data: dict):
+    """处理来自 MJPEG 服务器的操作请求"""
     if not app_state.current_device:
-        return "❌ 请先选择设备", gr.update()
+        return
+
+    screen_w, screen_h = _get_screen_size()
+
+    if op_type == 'tap':
+        x = int(data.get('x', 0.5) * screen_w)
+        y = int(data.get('y', 0.5) * screen_h)
+        app_state.device_manager.tap(x, y, app_state.current_device)
+
+    elif op_type == 'swipe':
+        x1 = int(data.get('x1', 0.5) * screen_w)
+        y1 = int(data.get('y1', 0.5) * screen_h)
+        x2 = int(data.get('x2', 0.5) * screen_w)
+        y2 = int(data.get('y2', 0.5) * screen_h)
+        duration = int(data.get('duration', 300))
+        app_state.device_manager.swipe(x1, y1, x2, y2, duration, app_state.current_device)
+
+    elif op_type == 'back':
+        app_state.device_manager.press_back(app_state.current_device)
+
+    elif op_type == 'home':
+        app_state.device_manager.press_home(app_state.current_device)
+
+    elif op_type == 'recent':
+        app_state.device_manager.press_recent(app_state.current_device)
+
+
+# 注册操作回调
+set_operation_callback(_handle_device_operation)
+
+
+def handle_start_stream() -> Tuple[str, str, gr.update]:
+    """
+    启动云手机模式
+
+    返回: (状态消息, 云手机HTML, preview_image可见性)
+    """
+    if not app_state.current_device:
+        return "❌ 请先选择设备", "", gr.update()
 
     streamer = get_screen_streamer()
+    mjpeg = get_mjpeg_server()
+
+    # 启动 MJPEG 服务器
+    if not mjpeg.is_running():
+        mjpeg.start()
 
     # 如果已经在运行，先停止
     if streamer.is_running():
@@ -1080,20 +1195,31 @@ def handle_start_stream() -> Tuple[str, gr.update]:
     success, msg = streamer.start(app_state.current_device, fps=25)
 
     if success:
-        return f"✅ {msg}", gr.Timer(active=True)
+        # 等待第一帧
+        time.sleep(0.3)
 
-    return f"❌ {msg}", gr.update()
+        stream_url = mjpeg.get_stream_url()
+        api_base = f"http://127.0.0.1:{mjpeg.port}"
+        html = _generate_cloud_phone_html(stream_url, api_base)
+
+        return f"✅ 云手机模式已启动", html, gr.update(visible=False)
+
+    return f"❌ {msg}", "", gr.update()
 
 
-def handle_stop_stream() -> Tuple[str, gr.update]:
-    """停止实时画面流"""
+def handle_stop_stream() -> Tuple[str, str, gr.update]:
+    """
+    停止云手机模式
+
+    返回: (状态消息, 空HTML, preview_image可见性)
+    """
     streamer = get_screen_streamer()
 
     if not streamer.is_running():
-        return "ℹ️ 流未运行", gr.update()
+        return "ℹ️ 未启动", "", gr.update(visible=True)
 
     success, msg = streamer.stop()
-    return f"✅ {msg}" if success else f"❌ {msg}", gr.Timer(active=False)
+    return f"✅ {msg}" if success else f"❌ {msg}", "", gr.update(visible=True)
 
 
 # ==================== 屏幕操作功能 ====================
@@ -2660,14 +2786,12 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
 
-                        # 实时画面流定时器 (放在 Image 前面，用于 every 参数)
-                        stream_timer = gr.Timer(value=0.05, active=False)
+                        # 云手机模式（MJPEG 流 + JavaScript 交互）
+                        cloud_phone_html = gr.HTML(value="", label="云手机")
 
-                        # 使用 every 参数让 Image 自动刷新，独立于事件队列
+                        # 静态截图模式（非实时，仅刷新按钮使用）
                         preview_image = gr.Image(
-                            label="点击屏幕直接操作",
-                            value=auto_refresh_tick,
-                            every=stream_timer,
+                            label="截图预览",
                             type="pil",
                             height=480,
                             interactive=True,
@@ -2675,21 +2799,11 @@ def create_app() -> gr.Blocks:
 
                         operation_status = gr.Textbox(label="", interactive=False, lines=1)
 
-                        # 导航按钮
+                        # 控制按钮
                         with gr.Row():
-                            refresh_btn = gr.Button("🔄 刷新")
-                            start_stream_btn = gr.Button("▶️ 实时", variant="primary", scale=0, min_width=70)
-                            stop_stream_btn = gr.Button("⏹️ 停止", scale=0, min_width=70)
-                            back_btn = gr.Button("◀ 返回")
-                            home_btn = gr.Button("🏠 主页")
-                            recent_btn = gr.Button("📋 最近")
-
-                        # 滑动按钮
-                        with gr.Row():
-                            swipe_up_btn = gr.Button("⬆ 上滑")
-                            swipe_down_btn = gr.Button("⬇ 下滑")
-                            swipe_left_btn = gr.Button("⬅ 左滑")
-                            swipe_right_btn = gr.Button("➡ 右滑")
+                            refresh_btn = gr.Button("🔄 截图")
+                            start_stream_btn = gr.Button("▶️ 云手机", variant="primary")
+                            stop_stream_btn = gr.Button("⏹️ 停止")
 
                         # 文本输入
                         with gr.Row():
@@ -3086,61 +3200,24 @@ def create_app() -> gr.Blocks:
                 outputs=[preview_image],
             )
 
-            # 实时画面流控制
+            # 云手机模式控制
             start_stream_btn.click(
                 fn=handle_start_stream,
-                outputs=[operation_status, stream_timer],
+                outputs=[operation_status, cloud_phone_html, preview_image],
             )
 
             stop_stream_btn.click(
                 fn=handle_stop_stream,
-                outputs=[operation_status, stream_timer],
+                outputs=[operation_status, cloud_phone_html, preview_image],
             )
 
-            # 屏幕点击（无输出，避免阻塞刷新）
+            # 静态截图模式下的点击（云手机模式下由 JavaScript 处理）
             preview_image.select(
                 fn=handle_screen_click,
                 queue=False,
             )
 
-            # 导航按钮（无输出，避免阻塞刷新）
-            back_btn.click(
-                fn=handle_back,
-                queue=False,
-            )
-
-            home_btn.click(
-                fn=handle_home,
-                queue=False,
-            )
-
-            recent_btn.click(
-                fn=handle_recent,
-                queue=False,
-            )
-
-            # 滑动操作（无输出，避免阻塞刷新）
-            swipe_up_btn.click(
-                fn=lambda: handle_swipe("up"),
-                queue=False,
-            )
-
-            swipe_down_btn.click(
-                fn=lambda: handle_swipe("down"),
-                queue=False,
-            )
-
-            swipe_left_btn.click(
-                fn=lambda: handle_swipe("left"),
-                queue=False,
-            )
-
-            swipe_right_btn.click(
-                fn=lambda: handle_swipe("right"),
-                queue=False,
-            )
-
-            # 文本输入（无输出，避免阻塞刷新）
+            # 文本输入
             send_text_btn.click(
                 fn=handle_input_text,
                 inputs=[text_input],
