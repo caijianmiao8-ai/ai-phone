@@ -4,6 +4,7 @@
 """
 import os
 import io
+import sys
 import subprocess
 import threading
 import time
@@ -11,6 +12,16 @@ import platform
 import struct
 from typing import Optional, Tuple
 from PIL import Image
+
+
+def _get_base_path() -> str:
+    """获取应用基础路径，兼容 PyInstaller 打包"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后的路径
+        return sys._MEIPASS
+    else:
+        # 开发环境路径
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class ScreenStreamer:
@@ -44,8 +55,8 @@ class ScreenStreamer:
         if self.scrcpy_path and os.path.exists(self.scrcpy_path):
             return self.scrcpy_path
 
-        # 检查内置路径
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # 检查内置路径（兼容 PyInstaller 打包）
+        base_dir = _get_base_path()
         bundled = os.path.join(base_dir, "scrcpy", "scrcpy.exe" if platform.system() == "Windows" else "scrcpy")
         if os.path.exists(bundled):
             return bundled
@@ -59,8 +70,8 @@ class ScreenStreamer:
         if self.adb_path and os.path.exists(self.adb_path):
             return self.adb_path
 
-        # 检查内置路径
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # 检查内置路径（兼容 PyInstaller 打包）
+        base_dir = _get_base_path()
         bundled = os.path.join(base_dir, "adb", "adb.exe" if platform.system() == "Windows" else "adb")
         if os.path.exists(bundled):
             return bundled
@@ -70,9 +81,9 @@ class ScreenStreamer:
 
     def _find_ffmpeg(self) -> Optional[str]:
         """查找 ffmpeg 路径"""
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # 检查内置路径（兼容 PyInstaller 打包）
+        base_dir = _get_base_path()
 
-        # 检查内置路径
         if platform.system() == "Windows":
             bundled = os.path.join(base_dir, "ffmpeg", "ffmpeg.exe")
         else:
@@ -98,9 +109,9 @@ class ScreenStreamer:
         ffmpeg = self._find_ffmpeg()
 
         if not scrcpy:
-            self._error_message = "scrcpy 不可用，切换到截图模式"
-            self._mode = "screenshot"
-            self._capture_loop_screenshot()
+            self._error_message = "scrcpy 不可用，尝试 screenrecord 模式"
+            self._mode = "screenrecord"
+            self._capture_loop_screenrecord()
             return
 
         if not ffmpeg:
@@ -111,7 +122,8 @@ class ScreenStreamer:
 
         try:
             # 启动 scrcpy，输出 H.264 到管道
-            scrcpy_cmd = [scrcpy, "--no-window", "--no-audio", "--max-fps=30"]
+            # 使用 --video-codec=h264 确保输出格式
+            scrcpy_cmd = [scrcpy, "--no-window", "--no-audio", "--max-fps=30", "--video-codec=h264"]
             if self._device_id:
                 scrcpy_cmd.extend(["-s", self._device_id])
             # 录制到 stdout (scrcpy 2.0+)
@@ -132,7 +144,7 @@ class ScreenStreamer:
             # 创建进程管道
             popen_kwargs = {
                 "stdout": subprocess.PIPE,
-                "stderr": subprocess.DEVNULL,
+                "stderr": subprocess.PIPE,  # 捕获错误输出用于调试
             }
             if platform.system() == "Windows":
                 popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -179,11 +191,18 @@ class ScreenStreamer:
                         self._latest_frame = frame
 
         except Exception as e:
-            self._error_message = f"scrcpy 流错误: {e}，切换到截图模式"
-            self._mode = "screenshot"
+            self._error_message = f"scrcpy 流错误: {e}，尝试 screenrecord 模式"
+            self._mode = "screenrecord"
             self._stop_processes()
             if self._running:
-                self._capture_loop_screenshot()
+                self._capture_loop_screenrecord()
+
+        # 如果循环正常退出但没有收到数据，尝试回退
+        if self._running and self._latest_frame is None:
+            self._error_message = "scrcpy 无数据输出，尝试 screenrecord 模式"
+            self._mode = "screenrecord"
+            self._stop_processes()
+            self._capture_loop_screenrecord()
 
     def _stop_processes(self):
         """停止 scrcpy 和 ffmpeg 进程"""
