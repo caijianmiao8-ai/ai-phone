@@ -1235,28 +1235,38 @@ def handle_start_stream() -> Tuple[str, str, gr.update]:
 
     # 启动 MJPEG 服务器
     if not mjpeg.is_running():
+        print("[DEBUG] 正在启动 MJPEG 服务器...")
         if not mjpeg.start():
             return "❌ MJPEG 服务器启动失败", "", gr.update()
+        print(f"[DEBUG] MJPEG 服务器已启动，端口: {mjpeg.port}")
 
     # 使用现有截图作为初始帧，避免启动时黑屏
     initial_frame = app_state.current_screenshot
     if not initial_frame:
         # 如果没有现有截图，立即获取一张
+        print("[DEBUG] 没有现有截图，正在获取...")
         success, data = app_state.device_manager.take_screenshot(app_state.current_device)
         if success and data:
             initial_frame = data
             app_state.current_screenshot = data
+            print(f"[DEBUG] 获取截图成功，大小: {len(data)} 字节")
+        else:
+            print("[DEBUG] 获取截图失败")
 
     if initial_frame:
-        streamer.set_initial_frame(initial_frame)
+        result = streamer.set_initial_frame(initial_frame)
+        print(f"[DEBUG] 设置初始帧: {result}, 帧大小: {len(initial_frame)} 字节")
 
     # 启动截图流（使用截图模式，最可靠，不依赖 ffmpeg）
     success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
+    print(f"[DEBUG] 启动 streamer: success={success}, msg={msg}")
 
     if success:
         stream_url = mjpeg.get_stream_url()
         html = _generate_stream_html(stream_url)
         mode = streamer.get_mode()
+        print(f"[DEBUG] 生成 HTML，stream_url: {stream_url}")
+        print(f"[DEBUG] HTML 内容: {html[:200]}...")
         return f"✅ 实时已启动 ({mode})", html, gr.update(visible=False)
 
     return f"❌ {msg}", "", gr.update()
