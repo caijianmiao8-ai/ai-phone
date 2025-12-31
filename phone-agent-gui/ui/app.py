@@ -1209,9 +1209,11 @@ set_operation_callback(_handle_device_operation)
 def _generate_stream_html(stream_url: str) -> str:
     """生成 MJPEG 视频流 HTML"""
     return f'''
-<div style="display:flex; justify-content:center; align-items:center; min-height:200px;">
+<div style="display:flex; flex-direction:column; justify-content:center; align-items:center; min-height:200px; background:#1a1a1a; border-radius:8px; padding:10px;">
+    <div style="color:#888; margin-bottom:10px;">实时画面 (MJPEG)</div>
     <img src="{stream_url}"
-         style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2);" />
+         style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2);"
+         onerror="this.parentElement.innerHTML='<div style=color:red>视频流加载失败: {stream_url}</div>'" />
 </div>
 '''
 
