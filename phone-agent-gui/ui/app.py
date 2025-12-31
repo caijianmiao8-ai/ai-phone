@@ -3314,10 +3314,14 @@ def create_app() -> gr.Blocks:
                 queue=False,
             )
 
-            # 操作后延迟刷新截图的函数
-            def delayed_refresh():
-                time.sleep(0.3)  # 等待操作生效
-                return get_stream_frame() or refresh_screenshot()
+            # 操作后刷新截图的函数（实时模式下跳过，Timer 会自动刷新）
+            def smart_refresh():
+                streamer = get_screen_streamer()
+                if streamer.is_running():
+                    # 实时模式下，Timer 会自动刷新，无需手动刷新
+                    return None
+                # 非实时模式，获取新截图
+                return refresh_screenshot()
 
             # 截图点击
             preview_image.select(
@@ -3325,7 +3329,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3336,7 +3340,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3345,7 +3349,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3354,7 +3358,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3365,7 +3369,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3374,7 +3378,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3383,7 +3387,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
@@ -3392,7 +3396,7 @@ def create_app() -> gr.Blocks:
                 outputs=[operation_status],
                 queue=False,
             ).then(
-                fn=delayed_refresh,
+                fn=smart_refresh,
                 outputs=[preview_image],
                 queue=False,
             )
