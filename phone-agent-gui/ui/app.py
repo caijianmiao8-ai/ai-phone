@@ -1206,90 +1206,86 @@ def _handle_device_operation(op_type: str, data: dict):
 set_operation_callback(_handle_device_operation)
 
 
-def _generate_stream_html(stream_url: str) -> str:
-    """生成 MJPEG 视频流 HTML"""
-    return f'''
-<div style="display:flex; flex-direction:column; justify-content:center; align-items:center; min-height:200px; background:#1a1a1a; border-radius:8px; padding:10px;">
-    <div style="color:#888; margin-bottom:10px;">实时画面 (MJPEG)</div>
-    <img src="{stream_url}"
-         style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2);"
-         onerror="this.parentElement.innerHTML='<div style=color:red>视频流加载失败: {stream_url}</div>'" />
-</div>
-'''
-
-
-def handle_start_stream() -> Tuple[str, str, gr.update]:
+def handle_start_stream() -> Tuple[str, Optional[Image.Image]]:
     """
-    启动实时模式 - 使用独立的 MJPEG 流
+    启动实时模式 - 使用 Gradio 原生刷新
 
-    返回: (状态消息, 流HTML, preview_image可见性)
+    返回: (状态消息, 初始图片)
     """
     if not app_state.current_device:
-        return "❌ 请先选择设备", "", gr.update()
+        return "❌ 请先选择设备", None
 
     streamer = get_screen_streamer()
-    mjpeg = get_mjpeg_server()
 
     # 如果已经在运行，先停止
     if streamer.is_running():
         streamer.stop()
         time.sleep(0.1)
 
-    # 启动 MJPEG 服务器
-    if not mjpeg.is_running():
-        print("[DEBUG] 正在启动 MJPEG 服务器...")
-        if not mjpeg.start():
-            return "❌ MJPEG 服务器启动失败", "", gr.update()
-        print(f"[DEBUG] MJPEG 服务器已启动，端口: {mjpeg.port}")
+    # 获取初始截图
+    initial_image = None
+    if app_state.current_screenshot:
+        try:
+            initial_image = Image.open(io.BytesIO(app_state.current_screenshot))
+        except Exception:
+            pass
 
-    # 使用现有截图作为初始帧，避免启动时黑屏
-    initial_frame = app_state.current_screenshot
-    if not initial_frame:
-        # 如果没有现有截图，立即获取一张
-        print("[DEBUG] 没有现有截图，正在获取...")
+    if not initial_image:
         success, data = app_state.device_manager.take_screenshot(app_state.current_device)
         if success and data:
-            initial_frame = data
             app_state.current_screenshot = data
-            print(f"[DEBUG] 获取截图成功，大小: {len(data)} 字节")
-        else:
-            print("[DEBUG] 获取截图失败")
+            try:
+                initial_image = Image.open(io.BytesIO(data))
+            except Exception:
+                pass
 
-    if initial_frame:
-        result = streamer.set_initial_frame(initial_frame)
-        print(f"[DEBUG] 设置初始帧: {result}, 帧大小: {len(initial_frame)} 字节")
-
-    # 启动截图流（使用截图模式，最可靠，不依赖 ffmpeg）
+    # 启动截图流
     success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
-    print(f"[DEBUG] 启动 streamer: success={success}, msg={msg}")
 
     if success:
-        stream_url = mjpeg.get_stream_url()
-        html = _generate_stream_html(stream_url)
         mode = streamer.get_mode()
-        print(f"[DEBUG] 生成 HTML，stream_url: {stream_url}")
-        print(f"[DEBUG] HTML 内容: {html[:200]}...")
-        return f"✅ 实时已启动 ({mode})", html, gr.update(visible=False)
+        return f"✅ 实时已启动 ({mode})", initial_image
 
-    return f"❌ {msg}", "", gr.update()
+    return f"❌ {msg}", initial_image
 
 
-def handle_stop_stream() -> Tuple[str, str, gr.update]:
+def handle_stop_stream() -> Tuple[str, Optional[Image.Image]]:
     """停止实时模式"""
     streamer = get_screen_streamer()
 
     if not streamer.is_running():
-        return "ℹ️ 未启动", "", gr.update(visible=True)
+        return "ℹ️ 未启动", None
 
     success, msg = streamer.stop()
-    return f"✅ {msg}" if success else f"❌ {msg}", "", gr.update(visible=True)
+
+    # 停止后获取一张静态截图
+    final_image = None
+    if app_state.current_device:
+        ok, data = app_state.device_manager.take_screenshot(app_state.current_device)
+        if ok and data:
+            app_state.current_screenshot = data
+            try:
+                final_image = Image.open(io.BytesIO(data))
+            except Exception:
+                pass
+
+    return f"✅ {msg}" if success else f"❌ {msg}", final_image
 
 
 def get_stream_frame() -> Optional[Image.Image]:
-    """获取实时帧（供 Timer 调用）"""
+    """获取实时帧（供定时刷新调用）"""
     streamer = get_screen_streamer()
     if streamer.is_running():
-        return streamer.get_frame()
+        frame = streamer.get_frame()
+        return frame
+    return None
+
+
+def auto_refresh_frame() -> Optional[Image.Image]:
+    """自动刷新帧 - 仅在实时模式运行时返回新帧"""
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        return streamer.get_frame_if_new()
     return None
 
 
@@ -2861,12 +2857,12 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
 
-                        # MJPEG 实时流（独立于 Gradio 事件系统）
-                        stream_html = gr.HTML(value="", label="实时画面")
+                        # 定时器：实时模式下自动刷新画面
+                        stream_timer = gr.Timer(value=0.2, active=False)
 
-                        # 静态截图预览（用于点击操作）
+                        # 屏幕预览（支持点击操作和实时刷新）
                         preview_image = gr.Image(
-                            label="屏幕预览（点击操作）",
+                            label="屏幕预览",
                             type="pil",
                             height=480,
                             interactive=True,
@@ -3290,16 +3286,31 @@ def create_app() -> gr.Blocks:
                 queue=False,
             )
 
-            # 实时模式控制（MJPEG 流独立于 Gradio）
+            # 实时模式控制
+            def start_stream_and_timer():
+                status, image = handle_start_stream()
+                return status, image, gr.Timer(active=True)
+
+            def stop_stream_and_timer():
+                status, image = handle_stop_stream()
+                return status, image, gr.Timer(active=False)
+
             start_stream_btn.click(
-                fn=handle_start_stream,
-                outputs=[operation_status, stream_html, preview_image],
+                fn=start_stream_and_timer,
+                outputs=[operation_status, preview_image, stream_timer],
                 queue=False,
             )
 
             stop_stream_btn.click(
-                fn=handle_stop_stream,
-                outputs=[operation_status, stream_html, preview_image],
+                fn=stop_stream_and_timer,
+                outputs=[operation_status, preview_image, stream_timer],
+                queue=False,
+            )
+
+            # 定时器刷新画面
+            stream_timer.tick(
+                fn=get_stream_frame,
+                outputs=[preview_image],
                 queue=False,
             )
 
