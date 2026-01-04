@@ -2860,12 +2860,13 @@ def create_app() -> gr.Blocks:
                         # 定时器：实时模式下自动刷新画面
                         stream_timer = gr.Timer(value=0.2, active=False)
 
-                        # 屏幕预览（支持点击操作和实时刷新）
+                        # 屏幕预览（只显示，不允许上传）
                         preview_image = gr.Image(
                             label="屏幕预览",
                             type="pil",
                             height=480,
-                            interactive=True,
+                            interactive=True,  # 需要 True 才能支持点击
+                            sources=[],  # 禁用上传功能
                         )
 
 
@@ -3289,11 +3290,12 @@ def create_app() -> gr.Blocks:
             # 实时模式控制
             def start_stream_and_timer():
                 status, image = handle_start_stream()
-                return status, image, gr.Timer(active=True)
+                # 如果没有图片，不更新图片组件（避免显示上传提示）
+                return status, image if image else gr.update(), gr.Timer(active=True)
 
             def stop_stream_and_timer():
                 status, image = handle_stop_stream()
-                return status, image, gr.Timer(active=False)
+                return status, image if image else gr.update(), gr.Timer(active=False)
 
             start_stream_btn.click(
                 fn=start_stream_and_timer,
@@ -3314,49 +3316,90 @@ def create_app() -> gr.Blocks:
                 queue=False,
             )
 
-            # 截图点击（只执行操作，刷新由 Timer 或手动截图按钮负责）
+            # 非实时模式下刷新截图（实时模式下跳过，Timer 会刷新）
+            def maybe_refresh():
+                streamer = get_screen_streamer()
+                if streamer.is_running():
+                    return gr.update()  # 实时模式，不更新（Timer 会刷新）
+                # 非实时模式，等待操作生效后刷新
+                time.sleep(0.3)
+                return refresh_screenshot()
+
+            # 截图点击
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
 
-            # 导航按钮（只执行操作，不刷新）
+            # 导航按钮
             back_btn.click(
                 fn=handle_back,
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
             home_btn.click(
                 fn=handle_home,
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             recent_btn.click(
                 fn=handle_recent,
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
 
-            # 滑动按钮（只执行操作，不刷新）
+            # 滑动按钮
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
                 outputs=[operation_status],
                 queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
+                queue=False,
             )
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
+                queue=False,
+            ).then(
+                fn=maybe_refresh,
+                outputs=[preview_image],
                 queue=False,
             )
 
