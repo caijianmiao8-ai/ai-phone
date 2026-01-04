@@ -3314,90 +3314,49 @@ def create_app() -> gr.Blocks:
                 queue=False,
             )
 
-            # 操作后刷新截图的函数（实时模式下跳过，Timer 会自动刷新）
-            def smart_refresh():
-                streamer = get_screen_streamer()
-                if streamer.is_running():
-                    # 实时模式下，Timer 会自动刷新，无需手动刷新
-                    return None
-                # 非实时模式，获取新截图
-                return refresh_screenshot()
-
-            # 截图点击
+            # 截图点击（只执行操作，刷新由 Timer 或手动截图按钮负责）
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
 
-            # 导航按钮
+            # 导航按钮（只执行操作，不刷新）
             back_btn.click(
                 fn=handle_back,
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
             home_btn.click(
                 fn=handle_home,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             recent_btn.click(
                 fn=handle_recent,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
 
-            # 滑动按钮
+            # 滑动按钮（只执行操作，不刷新）
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=smart_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
 
