@@ -1224,9 +1224,11 @@ def handle_start_stream() -> Tuple[str, Optional[Image.Image]]:
 
     # 获取初始截图
     initial_image = None
+    initial_data = None
     if app_state.current_screenshot:
         try:
             initial_image = Image.open(io.BytesIO(app_state.current_screenshot))
+            initial_data = app_state.current_screenshot
         except Exception:
             pass
 
@@ -1234,6 +1236,7 @@ def handle_start_stream() -> Tuple[str, Optional[Image.Image]]:
         success, data = app_state.device_manager.take_screenshot(app_state.current_device)
         if success and data:
             app_state.current_screenshot = data
+            initial_data = data
             try:
                 initial_image = Image.open(io.BytesIO(data))
             except Exception:
@@ -1241,6 +1244,10 @@ def handle_start_stream() -> Tuple[str, Optional[Image.Image]]:
 
     # 启动截图流
     success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
+
+    # 设置初始帧，确保 Timer 第一次调用时有画面
+    if initial_data:
+        streamer.set_initial_frame(initial_data)
 
     if success:
         mode = streamer.get_mode()
@@ -1272,13 +1279,17 @@ def handle_stop_stream() -> Tuple[str, Optional[Image.Image]]:
     return f"✅ {msg}" if success else f"❌ {msg}", final_image
 
 
-def get_stream_frame() -> Optional[Image.Image]:
+def get_stream_frame():
     """获取实时帧（供定时刷新调用）"""
     streamer = get_screen_streamer()
     if streamer.is_running():
         frame = streamer.get_frame()
-        return frame
-    return None
+        if frame is not None:
+            return frame
+        # 没有帧时返回 gr.update()，避免清空已有图片
+        return gr.update()
+    # 未运行时也返回 gr.update()
+    return gr.update()
 
 
 def auto_refresh_frame() -> Optional[Image.Image]:
@@ -3320,10 +3331,18 @@ def create_app() -> gr.Blocks:
             def maybe_refresh():
                 streamer = get_screen_streamer()
                 if streamer.is_running():
-                    return gr.update()  # 实时模式，不更新（Timer 会刷新）
-                # 非实时模式，等待操作生效后刷新
+                    yield gr.update()  # 实时模式，不更新（Timer 会刷新）
+                    return
+                # 非实时模式，多次刷新以捕获动画结束后的画面
+                # 第一次刷新：操作刚执行完
+                time.sleep(0.2)
+                yield refresh_screenshot()
+                # 第二次刷新：等待动画/过渡效果
+                time.sleep(0.4)
+                yield refresh_screenshot()
+                # 第三次刷新：确保画面稳定
                 time.sleep(0.3)
-                return refresh_screenshot()
+                yield refresh_screenshot()
 
             # 截图点击
             preview_image.select(
