@@ -183,13 +183,15 @@ class RemoteScreenCapture:
             )
 
             if result.returncode == 0 and result.stdout:
-                # 验证是有效的 PNG
-                if result.stdout[:8] == b'\x89PNG\r\n\x1a\n':
+                # 验证是有效的 PNG (头部: 89 50 4E 47 0D 0A 1A 0A)
+                png_header = b'\x89PNG\r\n\x1a\n'
+                if result.stdout[:8] == png_header:
                     return result.stdout
-                # 某些设备可能返回带 \r\n 的数据，尝试修复
-                fixed = result.stdout.replace(b'\r\n', b'\n')
-                if fixed[:8] == b'\x89PNG\r\n\x1a\n':
-                    return fixed
+
+                # 某些环境可能破坏二进制数据，尝试检测并跳过
+                # 如果不是有效 PNG 但有数据，记录错误
+                if len(result.stdout) > 100:
+                    self._stats.last_error = "截图数据格式异常"
 
             return None
 

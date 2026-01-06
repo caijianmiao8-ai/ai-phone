@@ -867,6 +867,11 @@ def connect_wifi(ip_address: str):
 
 def disconnect_device() -> str:
     """断开设备连接"""
+    # 停止远程捕获
+    capture = get_remote_capture()
+    if capture.is_running():
+        capture.stop()
+
     success, message = app_state.device_manager.disconnect_all()
     app_state.current_device = None
     return "已断开所有远程连接"
