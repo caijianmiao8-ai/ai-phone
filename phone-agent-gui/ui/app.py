@@ -30,6 +30,7 @@ from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
 from core.task_analyzer import TaskAnalyzer, AnalysisResult
 from core.screen_stream import get_screen_streamer, ScreenStreamer
 from core.mjpeg_server import get_mjpeg_server, set_operation_callback
+from core.remote_capture import get_remote_capture, RemoteScreenCapture
 
 
 # 配置 Gradio 缓存目录
@@ -822,13 +823,19 @@ def select_device(device_id: str) -> Tuple[str, str, str, bool, Optional[Image.I
 型号: {info.get('model') or '未知'}
 Android: {info.get('android_version') or '未知'}"""
 
-    # 同时刷新截图
+    # 启动远程捕获（自动刷新）
     screenshot = None
     if info.get("is_online"):
-        success, data = app_state.device_manager.take_screenshot(device_id)
-        if success and data:
-            app_state.current_screenshot = data
-            screenshot = Image.open(io.BytesIO(data))
+        capture = get_remote_capture()
+        success, msg, first_frame = capture.start(device_id)
+        if success and first_frame:
+            screenshot = first_frame
+        else:
+            # 回退到单次截图
+            success, data = app_state.device_manager.take_screenshot(device_id)
+            if success and data:
+                app_state.current_screenshot = data
+                screenshot = Image.open(io.BytesIO(data))
 
     return (
         info_text,
@@ -2868,8 +2875,8 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
 
-                        # 定时器：实时模式下自动刷新画面
-                        stream_timer = gr.Timer(value=0.2, active=False)
+                        # 定时器：始终活跃，自动刷新画面
+                        refresh_timer = gr.Timer(value=0.1, active=True)
 
                         # 屏幕预览（只显示，不允许上传）
                         preview_image = gr.Image(
@@ -2880,14 +2887,16 @@ def create_app() -> gr.Blocks:
                             sources=[],  # 禁用上传功能
                         )
 
-
+                        # 状态显示
                         operation_status = gr.Textbox(label="", interactive=False, lines=1)
 
                         # 控制按钮
                         with gr.Row():
                             refresh_btn = gr.Button("🔄 截图")
-                            start_stream_btn = gr.Button("▶️ 实时", variant="primary")
-                            stop_stream_btn = gr.Button("⏹️ 停止")
+                            pause_btn = gr.Button("⏸️ 暂停")
+                            # 保留旧变量名以兼容其他代码
+                            start_stream_btn = gr.Button("▶️ 实时", visible=False)
+                            stop_stream_btn = gr.Button("⏹️ 停止", visible=False)
 
                         # 导航按钮
                         with gr.Row():
@@ -3291,134 +3300,93 @@ def create_app() -> gr.Blocks:
                 ],
             )
 
-            # 屏幕操作
+            # ===== 屏幕操作事件 =====
+
+            # 手动截图按钮
             refresh_btn.click(
                 fn=refresh_screenshot,
                 outputs=[preview_image],
                 queue=False,
             )
 
-            # 实时模式控制
-            def start_stream_and_timer():
-                status, image = handle_start_stream()
-                # 如果没有图片，不更新图片组件（避免显示上传提示）
-                return status, image if image else gr.update(), gr.Timer(active=True)
+            # 暂停/继续按钮
+            def toggle_pause():
+                capture = get_remote_capture()
+                if capture.is_paused():
+                    capture.resume()
+                    return "▶️ 已继续", "⏸️ 暂停"
+                else:
+                    capture.pause()
+                    return "⏸️ 已暂停", "▶️ 继续"
 
-            def stop_stream_and_timer():
-                status, image = handle_stop_stream()
-                return status, image if image else gr.update(), gr.Timer(active=False)
-
-            start_stream_btn.click(
-                fn=start_stream_and_timer,
-                outputs=[operation_status, preview_image, stream_timer],
+            pause_btn.click(
+                fn=toggle_pause,
+                outputs=[operation_status, pause_btn],
                 queue=False,
             )
 
-            stop_stream_btn.click(
-                fn=stop_stream_and_timer,
-                outputs=[operation_status, preview_image, stream_timer],
-                queue=False,
-            )
+            # 定时器刷新画面（始终活跃）
+            def auto_refresh_frame():
+                """自动刷新帧 - Timer 回调"""
+                capture = get_remote_capture()
+                if not capture.is_running():
+                    return gr.update()
+                if capture.is_paused():
+                    return gr.update()
+                frame = capture.get_frame_if_new()
+                if frame:
+                    return frame
+                return gr.update()
 
-            # 定时器刷新画面
-            stream_timer.tick(
-                fn=get_stream_frame,
+            refresh_timer.tick(
+                fn=auto_refresh_frame,
                 outputs=[preview_image],
                 queue=False,
             )
 
-            # 非实时模式下刷新截图（实时模式下跳过，Timer 会刷新）
-            def maybe_refresh():
-                streamer = get_screen_streamer()
-                if streamer.is_running():
-                    yield gr.update()  # 实时模式，不更新（Timer 会刷新）
-                    return
-                # 非实时模式，多次刷新以捕获动画结束后的画面
-                # 第一次刷新：操作刚执行完
-                time.sleep(0.2)
-                yield refresh_screenshot()
-                # 第二次刷新：等待动画/过渡效果
-                time.sleep(0.4)
-                yield refresh_screenshot()
-                # 第三次刷新：确保画面稳定
-                time.sleep(0.3)
-                yield refresh_screenshot()
-
-            # 截图点击
+            # 截图点击（Timer 会自动刷新，不需要手动刷新）
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
 
-            # 导航按钮
+            # 导航按钮（Timer 会自动刷新）
             back_btn.click(
                 fn=handle_back,
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
             home_btn.click(
                 fn=handle_home,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             recent_btn.click(
                 fn=handle_recent,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
 
-            # 滑动按钮
+            # 滑动按钮（Timer 会自动刷新）
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=maybe_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
 
