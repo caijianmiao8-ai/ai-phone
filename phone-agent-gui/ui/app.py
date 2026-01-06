@@ -1325,7 +1325,15 @@ def _get_screen_size() -> Tuple[int, int]:
 
 
 def _get_image_size() -> Tuple[int, int]:
-    """获取当前截图的尺寸（带缓存）"""
+    """获取当前显示图片的尺寸（带缓存）"""
+    # 优先从远程捕获获取
+    capture = get_remote_capture()
+    if capture.is_running():
+        frame = capture.get_frame()
+        if frame:
+            return frame.size
+
+    # 回退到 current_screenshot
     if not app_state.current_screenshot:
         return 1080, 1920
 
