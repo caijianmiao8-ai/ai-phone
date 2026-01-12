@@ -481,7 +481,7 @@ class AgentWrapper:
         self._is_running = False
         self._should_stop = False
 
-    # ==================== Dify API 支持方法 ====================
+    # ==================== 单步执行方法 ====================
 
     def execute_single_step(
         self,
@@ -490,7 +490,7 @@ class AgentWrapper:
         timeout: float = 30.0
     ) -> Tuple[bool, str]:
         """
-        执行单步指令（供 Dify 工作流调用）
+        执行单步指令
 
         Args:
             device_id: 设备 ID
@@ -535,7 +535,7 @@ class AgentWrapper:
         context: str = ""
     ) -> dict:
         """
-        分析屏幕截图（供 Dify 工作流调用）
+        分析屏幕截图，回答指定问题
 
         Args:
             screenshot_base64: 截图 base64 数据
@@ -627,69 +627,204 @@ class AgentWrapper:
                 "details": f"分析失败: {str(e)}"
             }
 
-    def run_task_async(
-        self,
-        device_id: str,
-        task: str,
-        use_knowledge: bool = True,
-        max_steps: int = 50,
-        on_progress: Optional[Callable[[int, int, str], None]] = None
-    ) -> Tuple[bool, str]:
+    # ==================== 智能任务执行 ====================
+
+    def run_task_smart(self, task: str, max_steps: int = 50,
+                       timeout: float = 600) -> Generator[dict, None, None]:
         """
-        同步执行任务（供 API 服务器调用）
+        使用智能执行引擎执行任务（推荐）
+
+        特点：
+        - 自动任务分解
+        - 步骤验证和重试
+        - 异常处理（广告、弹窗等）
+        - 进度追踪
 
         Args:
-            device_id: 设备 ID
             task: 任务描述
-            use_knowledge: 是否使用知识库
-            max_steps: 最大步数
-            on_progress: 进度回调 (step, total, action)
+            max_steps: 最大步骤数
+            timeout: 超时时间（秒）
 
-        Returns:
-            (成功, 消息)
+        Yields:
+            进度信息字典
         """
-        # 临时设置参数
-        original_device_id = self.device_id
-        original_max_steps = self.max_steps
-        original_use_knowledge = self.use_knowledge_base
+        from core.smart_executor import SmartTaskExecutor
 
-        self.device_id = device_id
-        self.max_steps = max_steps
-        self.use_knowledge_base = use_knowledge
+        self._is_running = True
+        self._should_stop = False
 
         try:
-            step_count = 0
-            final_message = ""
+            # 创建 API 调用函数
+            def api_client(prompt: str, image_base64: Optional[str] = None) -> str:
+                from openai import OpenAI
+                client = OpenAI(
+                    base_url=self.api_base_url,
+                    api_key=self.api_key,
+                )
 
-            for result in self.run_task(task):
-                step_count += 1
+                messages = []
+                if image_base64:
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    })
+                else:
+                    messages.append({"role": "user", "content": prompt})
 
-                if on_progress:
-                    action_str = str(result.action) if result.action else ""
-                    on_progress(step_count, max_steps, action_str)
+                response = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+                return response.choices[0].message.content or ""
 
-                if result.finished:
-                    final_message = result.action if isinstance(result.action, str) else "任务完成"
-                    break
+            # 创建执行函数
+            def execute_func(instruction: str) -> Tuple[bool, str]:
+                return self.execute_single_step(self.device_id, instruction)
 
-                if result.error:
-                    final_message = result.error
-                    break
+            # 创建截图函数
+            def capture_func() -> str:
+                try:
+                    from phone_agent.device_factory import get_device_factory
+                    factory = get_device_factory()
+                    screenshot = factory.get_screenshot(self.device_id)
+                    if screenshot and screenshot.base64_data:
+                        return screenshot.base64_data
+                except Exception:
+                    pass
+                return ""
 
-            if not final_message:
-                final_message = f"已执行 {step_count} 步"
+            # 创建知识库搜索函数
+            def knowledge_search_func(query: str) -> str:
+                if not self.knowledge_manager:
+                    return ""
+                matches = self.knowledge_manager.search(query)
+                if not matches:
+                    return ""
+                # 返回最相关的知识
+                result = ""
+                for item in matches[:3]:
+                    result += f"## {item.title}\n{item.content}\n\n"
+                return result
 
-            return True, final_message
+            # 创建智能执行器
+            executor = SmartTaskExecutor(
+                api_client=api_client,
+                execute_func=execute_func,
+                capture_func=capture_func,
+                knowledge_search_func=knowledge_search_func if self.use_knowledge_base else None,
+                takeover_callback=self.takeover_callback,
+                on_log_callback=self.on_log_callback
+            )
+
+            # 流式执行
+            result = None
+            for progress in executor.execute_streaming(task, max_steps, timeout):
+                if self._should_stop:
+                    executor.stop()
+                    yield {"phase": "stopped", "message": "任务已手动停止"}
+                    return
+
+                yield progress
+
+                # 如果是最终结果
+                if isinstance(progress, dict) and progress.get("phase") == "error":
+                    return
+
+            # 返回最终结果
+            yield {
+                "phase": "completed",
+                "success": result.success if result else False,
+                "message": result.message if result else "任务完成"
+            }
 
         except Exception as e:
-            return False, f"任务执行失败: {str(e)}"
+            self._log(f"智能执行异常: {str(e)}")
+            yield {"phase": "error", "message": str(e)}
 
         finally:
-            # 恢复原参数
-            self.device_id = original_device_id
-            self.max_steps = original_max_steps
-            self.use_knowledge_base = original_use_knowledge
+            self._is_running = False
 
-    def stop_task(self, task_id: str = None):
-        """停止任务"""
-        self.stop()
+    def get_smart_executor(self):
+        """
+        获取智能执行器实例（用于高级控制）
+
+        Returns:
+            SmartTaskExecutor 实例
+        """
+        from core.smart_executor import SmartTaskExecutor
+        from openai import OpenAI
+
+        def api_client(prompt: str, image_base64: Optional[str] = None) -> str:
+            client = OpenAI(
+                base_url=self.api_base_url,
+                api_key=self.api_key,
+            )
+
+            messages = []
+            if image_base64:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                })
+            else:
+                messages.append({"role": "user", "content": prompt})
+
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            return response.choices[0].message.content or ""
+
+        def execute_func(instruction: str) -> Tuple[bool, str]:
+            return self.execute_single_step(self.device_id, instruction)
+
+        def capture_func() -> str:
+            try:
+                from phone_agent.device_factory import get_device_factory
+                factory = get_device_factory()
+                screenshot = factory.get_screenshot(self.device_id)
+                if screenshot and screenshot.base64_data:
+                    return screenshot.base64_data
+            except Exception:
+                pass
+            return ""
+
+        def knowledge_search_func(query: str) -> str:
+            if not self.knowledge_manager:
+                return ""
+            matches = self.knowledge_manager.search(query)
+            if not matches:
+                return ""
+            result = ""
+            for item in matches[:3]:
+                result += f"## {item.title}\n{item.content}\n\n"
+            return result
+
+        return SmartTaskExecutor(
+            api_client=api_client,
+            execute_func=execute_func,
+            capture_func=capture_func,
+            knowledge_search_func=knowledge_search_func if self.use_knowledge_base else None,
+            takeover_callback=self.takeover_callback,
+            on_log_callback=self.on_log_callback
+        )
