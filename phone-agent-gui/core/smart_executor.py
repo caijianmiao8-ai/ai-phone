@@ -590,14 +590,22 @@ class StepExecutor:
 
             # 7. 验证结果
             new_screenshot = capture_func()
+            if not new_screenshot:
+                retry_count += 1
+                continue
 
-            # 再次检测异常
-            exception_type, dismiss_action = self.exception_handler.detect_exception(new_screenshot)
-            if exception_type != ExceptionType.NONE:
-                handled = self.exception_handler.handle_exception(exception_type, dismiss_action)
-                if handled:
-                    exceptions_handled.append(exception_type.value)
-                    new_screenshot = capture_func()
+            # 再次检测异常（同样受次数限制）
+            if exception_handle_count < MAX_EXCEPTION_HANDLES:
+                exception_type, dismiss_action = self.exception_handler.detect_exception(new_screenshot)
+                if exception_type != ExceptionType.NONE:
+                    handled = self.exception_handler.handle_exception(exception_type, dismiss_action)
+                    if handled:
+                        exceptions_handled.append(exception_type.value)
+                        exception_handle_count += 1
+                        new_screenshot = capture_func()
+                        if not new_screenshot:
+                            retry_count += 1
+                            continue
 
             verify_result = self._verify_completion(new_screenshot, step, action)
 
@@ -661,11 +669,17 @@ class StepExecutor:
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
                 data = json.loads(json_match.group(0))
+                # 安全解析 confidence
+                confidence_raw = data.get("confidence", 0)
+                try:
+                    confidence = float(confidence_raw) / 100
+                except (TypeError, ValueError):
+                    confidence = 0.0
                 return VerificationResult(
-                    success=data.get("success", False),
-                    wrong_path=data.get("wrong_path", False),
-                    confidence=data.get("confidence", 0) / 100,
-                    reason=data.get("reason", "")
+                    success=bool(data.get("success", False)),
+                    wrong_path=bool(data.get("wrong_path", False)),
+                    confidence=confidence,
+                    reason=str(data.get("reason", ""))
                 )
         except Exception:
             pass
@@ -770,10 +784,22 @@ class SmartTaskExecutor:
             # Phase 1: 任务规划
             self._log("开始任务规划...")
             screenshot = self.capture_func()
+            if not screenshot:
+                self._log("无法获取屏幕截图")
+                return TaskResult(
+                    success=False,
+                    message="无法获取屏幕截图",
+                    total_time=time.time() - start_time,
+                    execution_log=execution_log
+                )
 
+            # 安全获取知识库内容
             knowledge = ""
             if self.knowledge_search_func:
-                knowledge = self.knowledge_search_func(task)
+                try:
+                    knowledge = self.knowledge_search_func(task)
+                except Exception as e:
+                    self._log(f"知识库搜索失败: {str(e)}")
 
             plan = self.planner.plan(task, screenshot, knowledge)
             context.plan = plan
@@ -904,12 +930,25 @@ class SmartTaskExecutor:
         context = ExecutionContext(task=task, start_time=start_time)
         execution_log = []
 
+        stopped_reason = None  # 记录停止原因
+
         try:
             # Phase 1: 规划
             yield {"phase": "planning", "message": "正在分析任务..."}
 
             screenshot = self.capture_func()
-            knowledge = self.knowledge_search_func(task) if self.knowledge_search_func else ""
+            if not screenshot:
+                yield {"phase": "error", "success": False, "message": "无法获取屏幕截图"}
+                return TaskResult(success=False, message="无法获取屏幕截图", total_time=time.time() - start_time)
+
+            # 安全获取知识库内容
+            knowledge = ""
+            if self.knowledge_search_func:
+                try:
+                    knowledge = self.knowledge_search_func(task)
+                except Exception as e:
+                    self._log(f"知识库搜索失败: {str(e)}")
+
             plan = self.planner.plan(task, screenshot, knowledge)
             context.plan = plan
 
@@ -922,7 +961,12 @@ class SmartTaskExecutor:
 
             # Phase 2: 执行
             for i, step in enumerate(plan.steps):
-                if self._should_stop or time.time() - start_time > timeout:
+                # 检查停止条件
+                if self._should_stop:
+                    stopped_reason = "stopped"
+                    break
+                if time.time() - start_time > timeout:
+                    stopped_reason = "timeout"
                     break
 
                 context.current_step_index = i
@@ -938,6 +982,9 @@ class SmartTaskExecutor:
                 step_result = self.step_executor.execute_step(
                     step, context, self.capture_func
                 )
+
+                # 更新异常历史
+                context.exception_history.extend(step_result.exceptions_handled)
 
                 if step_result.success:
                     context.completed_steps.append(i)
@@ -969,11 +1016,32 @@ class SmartTaskExecutor:
 
             # Phase 3: 完成
             total_time = time.time() - start_time
-            success = len(context.failed_steps) == 0 and len(context.completed_steps) > 0
+
+            # 确定最终状态和消息
+            if stopped_reason == "stopped":
+                success = False
+                message = "任务已手动停止"
+                phase = "stopped"
+            elif stopped_reason == "timeout":
+                success = False
+                message = f"任务超时（已用时 {int(total_time)} 秒）"
+                phase = "timeout"
+            elif len(context.failed_steps) > 0:
+                success = False
+                message = "任务执行失败"
+                phase = "completed"
+            elif len(context.completed_steps) > 0:
+                success = True
+                message = plan.understanding
+                phase = "completed"
+            else:
+                success = False
+                message = "任务未完成"
+                phase = "completed"
 
             final_result = TaskResult(
                 success=success,
-                message=plan.understanding if success else "任务未完成",
+                message=message,
                 steps_completed=len(context.completed_steps),
                 steps_skipped=len(context.skipped_steps),
                 steps_failed=len(context.failed_steps),
@@ -985,7 +1053,7 @@ class SmartTaskExecutor:
 
             # Yield final status before returning (so caller can capture it)
             yield {
-                "phase": "completed",
+                "phase": phase,
                 "success": final_result.success,
                 "message": final_result.message,
                 "steps_completed": final_result.steps_completed,

@@ -730,13 +730,12 @@ class AgentWrapper:
             for progress in executor.execute_streaming(task, max_steps, timeout):
                 if self._should_stop:
                     executor.stop()
-                    yield {"phase": "stopped", "message": "任务已手动停止"}
-                    return
+                    # 不立即返回，让 executor 处理停止逻辑并返回最终状态
 
                 yield progress
 
-                # 如果是最终结果（completed 或 error），循环会自然结束
-                if isinstance(progress, dict) and progress.get("phase") in ("completed", "error"):
+                # 如果是最终结果，循环会自然结束
+                if isinstance(progress, dict) and progress.get("phase") in ("completed", "error", "stopped", "timeout"):
                     return
 
         except Exception as e:
