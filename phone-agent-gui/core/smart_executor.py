@@ -529,24 +529,32 @@ class StepExecutor:
         retry_count = 0
         actions_taken = []
         exceptions_handled = []
+        exception_handle_count = 0  # 防止异常处理无限循环
+        MAX_EXCEPTION_HANDLES = 5   # 最多处理5次异常
 
         step.status = StepStatus.IN_PROGRESS
 
         while retry_count < step.max_retries:
             # 1. 获取当前屏幕
             screenshot = capture_func()
+            if not screenshot:
+                retry_count += 1
+                time.sleep(1)
+                continue
 
-            # 2. 检测异常界面
-            exception_type, dismiss_action = self.exception_handler.detect_exception(screenshot)
-            if exception_type != ExceptionType.NONE:
-                handled = self.exception_handler.handle_exception(exception_type, dismiss_action)
-                if handled:
-                    exceptions_handled.append(exception_type.value)
-                    # 处理后重新截图，不增加重试计数
-                    continue
-                else:
-                    retry_count += 1
-                    continue
+            # 2. 检测异常界面（限制检测次数避免无限循环）
+            if exception_handle_count < MAX_EXCEPTION_HANDLES:
+                exception_type, dismiss_action = self.exception_handler.detect_exception(screenshot)
+                if exception_type != ExceptionType.NONE:
+                    handled = self.exception_handler.handle_exception(exception_type, dismiss_action)
+                    if handled:
+                        exceptions_handled.append(exception_type.value)
+                        exception_handle_count += 1
+                        # 处理后重新截图，不增加重试计数
+                        continue
+                    else:
+                        retry_count += 1
+                        continue
 
             # 3. 检查是否已经完成（执行前检查）
             pre_verify = self._verify_completion(screenshot, step, "检查当前状态")
@@ -963,7 +971,7 @@ class SmartTaskExecutor:
             total_time = time.time() - start_time
             success = len(context.failed_steps) == 0 and len(context.completed_steps) > 0
 
-            return TaskResult(
+            final_result = TaskResult(
                 success=success,
                 message=plan.understanding if success else "任务未完成",
                 steps_completed=len(context.completed_steps),
@@ -975,13 +983,32 @@ class SmartTaskExecutor:
                 execution_log=execution_log
             )
 
+            # Yield final status before returning (so caller can capture it)
+            yield {
+                "phase": "completed",
+                "success": final_result.success,
+                "message": final_result.message,
+                "steps_completed": final_result.steps_completed,
+                "steps_skipped": final_result.steps_skipped,
+                "steps_failed": final_result.steps_failed,
+                "total_actions": final_result.total_actions,
+                "total_time": final_result.total_time
+            }
+
+            return final_result
+
         except Exception as e:
-            yield {"phase": "error", "message": str(e)}
-            return TaskResult(
+            error_result = TaskResult(
                 success=False,
                 message=f"执行异常: {str(e)}",
                 total_time=time.time() - start_time
             )
+            yield {
+                "phase": "error",
+                "success": False,
+                "message": str(e)
+            }
+            return error_result
 
     def stop(self):
         """停止执行"""

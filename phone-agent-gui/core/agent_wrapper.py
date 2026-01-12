@@ -727,7 +727,6 @@ class AgentWrapper:
             )
 
             # 流式执行
-            result = None
             for progress in executor.execute_streaming(task, max_steps, timeout):
                 if self._should_stop:
                     executor.stop()
@@ -736,16 +735,9 @@ class AgentWrapper:
 
                 yield progress
 
-                # 如果是最终结果
-                if isinstance(progress, dict) and progress.get("phase") == "error":
+                # 如果是最终结果（completed 或 error），循环会自然结束
+                if isinstance(progress, dict) and progress.get("phase") in ("completed", "error"):
                     return
-
-            # 返回最终结果
-            yield {
-                "phase": "completed",
-                "success": result.success if result else False,
-                "message": result.message if result else "任务完成"
-            }
 
         except Exception as e:
             self._log(f"智能执行异常: {str(e)}")
