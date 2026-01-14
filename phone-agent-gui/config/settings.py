@@ -56,6 +56,7 @@ class Settings:
     action_delay: float = 1.0
     language: str = "cn"
     verbose: bool = True
+    use_smart_executor: bool = False  # 使用智能执行器（任务分解+步骤验证）
 
     # 知识库配置
     knowledge_base_enabled: bool = True

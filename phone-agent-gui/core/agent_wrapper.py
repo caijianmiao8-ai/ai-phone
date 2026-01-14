@@ -480,3 +480,342 @@ class AgentWrapper:
             self._agent.reset()
         self._is_running = False
         self._should_stop = False
+
+    # ==================== 单步执行方法 ====================
+
+    def execute_single_step(
+        self,
+        device_id: str,
+        instruction: str,
+        timeout: float = 30.0
+    ) -> Tuple[bool, str]:
+        """
+        执行单步指令
+
+        Args:
+            device_id: 设备 ID
+            instruction: 指令描述（如"点击屏幕中央"、"上滑切换视频"）
+            timeout: 超时时间
+
+        Returns:
+            (成功, 消息)
+        """
+        try:
+            # 临时设置设备 ID
+            original_device_id = self.device_id
+            self.device_id = device_id
+            self._current_duration = 0  # 单步不需要时间限制
+
+            # 初始化 Agent（如果需要）
+            if not self._agent:
+                if not self._init_agent():
+                    return False, "Agent 初始化失败"
+            else:
+                # 更新设备 ID
+                self._agent.action_handler.device_id = device_id
+
+            # 重置 Agent 状态
+            self._agent.reset()
+
+            # 执行单步
+            result = self._agent.step(instruction)
+
+            # 恢复原设备 ID
+            self.device_id = original_device_id
+
+            return result.success, result.message or "执行完成"
+
+        except Exception as e:
+            return False, f"执行失败: {str(e)}"
+
+    def analyze_screen(
+        self,
+        screenshot_base64: str,
+        question: str,
+        context: str = ""
+    ) -> dict:
+        """
+        分析屏幕截图，回答指定问题
+
+        Args:
+            screenshot_base64: 截图 base64 数据
+            question: 分析问题（如"当前页面是否显示搜索结果？"）
+            context: 上下文信息
+
+        Returns:
+            {"answer": str, "confidence": float, "details": str}
+        """
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(
+                base_url=self.api_base_url,
+                api_key=self.api_key,
+            )
+
+            # 构建提示词
+            prompt = f"""请分析这张手机屏幕截图并回答问题。
+
+问题: {question}
+"""
+            if context:
+                prompt += f"\n上下文信息: {context}\n"
+
+            prompt += """
+请用简短的中文回答，格式如下：
+- 回答: [是/否/具体答案]
+- 置信度: [0-100的数字]
+- 详细说明: [简短说明]
+"""
+
+            # 调用 API
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{screenshot_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=500,
+            )
+
+            # 解析响应
+            content = response.choices[0].message.content or ""
+
+            # 简单解析
+            answer = ""
+            confidence = 0.0
+            details = ""
+
+            for line in content.split('\n'):
+                line = line.strip()
+                if line.startswith('- 回答:') or line.startswith('回答:'):
+                    answer = line.split(':', 1)[1].strip()
+                elif line.startswith('- 置信度:') or line.startswith('置信度:'):
+                    try:
+                        conf_str = line.split(':', 1)[1].strip().replace('%', '')
+                        confidence = float(conf_str) / 100 if float(conf_str) > 1 else float(conf_str)
+                    except:
+                        confidence = 0.5
+                elif line.startswith('- 详细说明:') or line.startswith('详细说明:'):
+                    details = line.split(':', 1)[1].strip()
+
+            # 如果解析失败，使用原始响应
+            if not answer:
+                answer = content
+                confidence = 0.5
+
+            return {
+                "answer": answer,
+                "confidence": confidence,
+                "details": details or content
+            }
+
+        except Exception as e:
+            return {
+                "answer": "",
+                "confidence": 0.0,
+                "details": f"分析失败: {str(e)}"
+            }
+
+    # ==================== 智能任务执行 ====================
+
+    def run_task_smart(self, task: str, max_steps: int = 50,
+                       timeout: float = 600) -> Generator[dict, None, None]:
+        """
+        使用智能执行引擎执行任务（推荐）
+
+        特点：
+        - 自动任务分解
+        - 步骤验证和重试
+        - 异常处理（广告、弹窗等）
+        - 进度追踪
+
+        Args:
+            task: 任务描述
+            max_steps: 最大步骤数
+            timeout: 超时时间（秒）
+
+        Yields:
+            进度信息字典
+        """
+        from core.smart_executor import SmartTaskExecutor
+
+        self._is_running = True
+        self._should_stop = False
+
+        try:
+            # 创建 API 调用函数
+            def api_client(prompt: str, image_base64: Optional[str] = None) -> str:
+                from openai import OpenAI
+                client = OpenAI(
+                    base_url=self.api_base_url,
+                    api_key=self.api_key,
+                )
+
+                messages = []
+                if image_base64:
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    })
+                else:
+                    messages.append({"role": "user", "content": prompt})
+
+                response = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+                return response.choices[0].message.content or ""
+
+            # 创建执行函数
+            def execute_func(instruction: str) -> Tuple[bool, str]:
+                return self.execute_single_step(self.device_id, instruction)
+
+            # 创建截图函数
+            def capture_func() -> str:
+                try:
+                    from phone_agent.device_factory import get_device_factory
+                    factory = get_device_factory()
+                    screenshot = factory.get_screenshot(self.device_id)
+                    if screenshot and screenshot.base64_data:
+                        return screenshot.base64_data
+                except Exception:
+                    pass
+                return ""
+
+            # 创建知识库搜索函数
+            def knowledge_search_func(query: str) -> str:
+                if not self.knowledge_manager:
+                    return ""
+                matches = self.knowledge_manager.search(query)
+                if not matches:
+                    return ""
+                # 返回最相关的知识
+                result = ""
+                for item in matches[:3]:
+                    result += f"## {item.title}\n{item.content}\n\n"
+                return result
+
+            # 创建智能执行器
+            executor = SmartTaskExecutor(
+                api_client=api_client,
+                execute_func=execute_func,
+                capture_func=capture_func,
+                knowledge_search_func=knowledge_search_func if self.use_knowledge_base else None,
+                takeover_callback=self.takeover_callback,
+                on_log_callback=self.on_log_callback
+            )
+
+            # 流式执行
+            for progress in executor.execute_streaming(task, max_steps, timeout):
+                if self._should_stop:
+                    executor.stop()
+                    # 不立即返回，让 executor 处理停止逻辑并返回最终状态
+
+                yield progress
+
+                # 如果是最终结果，循环会自然结束
+                if isinstance(progress, dict) and progress.get("phase") in ("completed", "error", "stopped", "timeout"):
+                    return
+
+        except Exception as e:
+            self._log(f"智能执行异常: {str(e)}")
+            yield {"phase": "error", "message": str(e)}
+
+        finally:
+            self._is_running = False
+
+    def get_smart_executor(self):
+        """
+        获取智能执行器实例（用于高级控制）
+
+        Returns:
+            SmartTaskExecutor 实例
+        """
+        from core.smart_executor import SmartTaskExecutor
+        from openai import OpenAI
+
+        def api_client(prompt: str, image_base64: Optional[str] = None) -> str:
+            client = OpenAI(
+                base_url=self.api_base_url,
+                api_key=self.api_key,
+            )
+
+            messages = []
+            if image_base64:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                })
+            else:
+                messages.append({"role": "user", "content": prompt})
+
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            return response.choices[0].message.content or ""
+
+        def execute_func(instruction: str) -> Tuple[bool, str]:
+            return self.execute_single_step(self.device_id, instruction)
+
+        def capture_func() -> str:
+            try:
+                from phone_agent.device_factory import get_device_factory
+                factory = get_device_factory()
+                screenshot = factory.get_screenshot(self.device_id)
+                if screenshot and screenshot.base64_data:
+                    return screenshot.base64_data
+            except Exception:
+                pass
+            return ""
+
+        def knowledge_search_func(query: str) -> str:
+            if not self.knowledge_manager:
+                return ""
+            matches = self.knowledge_manager.search(query)
+            if not matches:
+                return ""
+            result = ""
+            for item in matches[:3]:
+                result += f"## {item.title}\n{item.content}\n\n"
+            return result
+
+        return SmartTaskExecutor(
+            api_client=api_client,
+            execute_func=execute_func,
+            capture_func=capture_func,
+            knowledge_search_func=knowledge_search_func if self.use_knowledge_base else None,
+            takeover_callback=self.takeover_callback,
+            on_log_callback=self.on_log_callback
+        )

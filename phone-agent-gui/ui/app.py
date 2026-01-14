@@ -30,6 +30,7 @@ from core.task_queue import TaskQueueManager, TaskItem, TaskPriority
 from core.task_analyzer import TaskAnalyzer, AnalysisResult
 from core.screen_stream import get_screen_streamer, ScreenStreamer
 from core.mjpeg_server import get_mjpeg_server, set_operation_callback
+from core.remote_capture import get_remote_capture, RemoteScreenCapture
 
 
 # 配置 Gradio 缓存目录
@@ -822,13 +823,19 @@ def select_device(device_id: str) -> Tuple[str, str, str, bool, Optional[Image.I
 型号: {info.get('model') or '未知'}
 Android: {info.get('android_version') or '未知'}"""
 
-    # 同时刷新截图
+    # 启动远程捕获（自动刷新）
     screenshot = None
     if info.get("is_online"):
-        success, data = app_state.device_manager.take_screenshot(device_id)
-        if success and data:
-            app_state.current_screenshot = data
-            screenshot = Image.open(io.BytesIO(data))
+        capture = get_remote_capture()
+        success, msg, first_frame = capture.start(device_id)
+        if success and first_frame:
+            screenshot = first_frame
+        else:
+            # 回退到单次截图
+            success, data = app_state.device_manager.take_screenshot(device_id)
+            if success and data:
+                app_state.current_screenshot = data
+                screenshot = Image.open(io.BytesIO(data))
 
     return (
         info_text,
@@ -860,6 +867,11 @@ def connect_wifi(ip_address: str):
 
 def disconnect_device() -> str:
     """断开设备连接"""
+    # 停止远程捕获
+    capture = get_remote_capture()
+    if capture.is_running():
+        capture.stop()
+
     success, message = app_state.device_manager.disconnect_all()
     app_state.current_device = None
     return "已断开所有远程连接"
@@ -1206,68 +1218,97 @@ def _handle_device_operation(op_type: str, data: dict):
 set_operation_callback(_handle_device_operation)
 
 
-def _generate_stream_html(stream_url: str) -> str:
-    """生成独立的 MJPEG 视频流 HTML（不包含 JavaScript 点击处理）"""
-    return f'''
-<div style="display:flex; justify-content:center;">
-    <img src="{stream_url}"
-         style="max-width:100%; max-height:480px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2);"
-         onerror="this.style.opacity='0.5'"
-         onload="this.style.opacity='1'" />
-</div>
-'''
-
-
-def handle_start_stream() -> Tuple[str, str, gr.update]:
+def handle_start_stream() -> Tuple[str, Optional[Image.Image]]:
     """
-    启动实时模式 - 使用独立的 MJPEG 流
+    启动实时模式 - 使用 Gradio 原生刷新
 
-    返回: (状态消息, 流HTML, preview_image可见性)
+    返回: (状态消息, 初始图片)
     """
     if not app_state.current_device:
-        return "❌ 请先选择设备", "", gr.update()
+        return "❌ 请先选择设备", None
 
     streamer = get_screen_streamer()
-    mjpeg = get_mjpeg_server()
 
     # 如果已经在运行，先停止
     if streamer.is_running():
         streamer.stop()
         time.sleep(0.1)
 
-    # 启动 MJPEG 服务器
-    if not mjpeg.is_running():
-        if not mjpeg.start():
-            return "❌ MJPEG 服务器启动失败", "", gr.update()
+    # 获取初始截图
+    initial_image = None
+    initial_data = None
+    if app_state.current_screenshot:
+        try:
+            initial_image = Image.open(io.BytesIO(app_state.current_screenshot))
+            initial_data = app_state.current_screenshot
+        except Exception:
+            pass
 
-    # 启动截图流（使用截图模式，最可靠，不依赖 ffmpeg）
+    if not initial_image:
+        success, data = app_state.device_manager.take_screenshot(app_state.current_device)
+        if success and data:
+            app_state.current_screenshot = data
+            initial_data = data
+            try:
+                initial_image = Image.open(io.BytesIO(data))
+            except Exception:
+                pass
+
+    # 启动截图流
     success, msg = streamer.start(app_state.current_device, fps=5, use_scrcpy=False)
 
+    # 设置初始帧，确保 Timer 第一次调用时有画面
+    if initial_data:
+        streamer.set_initial_frame(initial_data)
+
     if success:
-        stream_url = mjpeg.get_stream_url()
-        html = _generate_stream_html(stream_url)
         mode = streamer.get_mode()
-        return f"✅ 实时已启动 ({mode})", html, gr.update(visible=False)
+        return f"✅ 实时已启动 ({mode})", initial_image
 
-    return f"❌ {msg}", "", gr.update()
+    return f"❌ {msg}", initial_image
 
 
-def handle_stop_stream() -> Tuple[str, str, gr.update]:
+def handle_stop_stream() -> Tuple[str, Optional[Image.Image]]:
     """停止实时模式"""
     streamer = get_screen_streamer()
 
     if not streamer.is_running():
-        return "ℹ️ 未启动", "", gr.update(visible=True)
+        return "ℹ️ 未启动", None
 
     success, msg = streamer.stop()
-    return f"✅ {msg}" if success else f"❌ {msg}", "", gr.update(visible=True)
+
+    # 停止后获取一张静态截图
+    final_image = None
+    if app_state.current_device:
+        ok, data = app_state.device_manager.take_screenshot(app_state.current_device)
+        if ok and data:
+            app_state.current_screenshot = data
+            try:
+                final_image = Image.open(io.BytesIO(data))
+            except Exception:
+                pass
+
+    return f"✅ {msg}" if success else f"❌ {msg}", final_image
 
 
-def get_stream_frame() -> Optional[Image.Image]:
-    """获取实时帧（供 Timer 调用）"""
+def get_stream_frame():
+    """获取实时帧（供定时刷新调用）"""
     streamer = get_screen_streamer()
     if streamer.is_running():
-        return streamer.get_frame()
+        frame = streamer.get_frame()
+        if frame is not None:
+            return frame
+        # 没有帧时返回 gr.update()，避免清空已有图片
+        return gr.update()
+    # 未运行时也返回 gr.update()
+    return gr.update()
+
+
+def auto_refresh_frame() -> Optional[Image.Image]:
+    """自动刷新帧 - 仅在实时模式运行时返回新帧"""
+    streamer = get_screen_streamer()
+    if streamer.is_running():
+        return streamer.get_frame_if_new()
     return None
 
 
@@ -1289,7 +1330,15 @@ def _get_screen_size() -> Tuple[int, int]:
 
 
 def _get_image_size() -> Tuple[int, int]:
-    """获取当前截图的尺寸（带缓存）"""
+    """获取当前显示图片的尺寸（带缓存）"""
+    # 优先从远程捕获获取
+    capture = get_remote_capture()
+    if capture.is_running():
+        frame = capture.get_frame()
+        if frame:
+            return frame.size
+
+    # 回退到 current_screenshot
     if not app_state.current_screenshot:
         return 1080, 1920
 
@@ -1821,57 +1870,164 @@ def execute_task_for_device(
     app_state.set_device_agent(device_id, agent)
     app_state.set_device_status(device_id, "🚀 执行中")
 
-    task_gen = agent.run_task(task)
     task_result: Optional[TaskResult] = None
     steps_executed = 0
     task_success = False
     error_message = None
 
-    try:
-        while True:
-            step_result = next(task_gen)
-            steps_executed += 1
-            if step_result.screenshot:
-                app_state.set_device_screenshot(device_id, step_result.screenshot)
-            status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
-            app_state.set_device_status(device_id, status_text)
-    except StopIteration as stop:
-        task_result = stop.value
-        if task_result and not task_result.success:
-            app_state.set_device_status(device_id, f"❌ {task_result.message}")
+    # 根据设置选择执行模式
+    if settings.use_smart_executor:
+        # 智能执行器模式
+        app_state.add_device_log(device_id, "🧠 使用智能执行器模式")
+        try:
+            for progress in agent.run_task_smart(task, effective_max_steps, timeout=600):
+                phase = progress.get("phase", "")
+
+                if phase == "planning":
+                    app_state.set_device_status(device_id, "🔍 任务规划中...")
+                    app_state.add_device_log(device_id, progress.get("message", "规划中"))
+
+                elif phase == "planned":
+                    total_steps = progress.get("total_steps", 0)
+                    understanding = progress.get("understanding", "")
+                    app_state.add_device_log(device_id, f"📋 任务理解: {understanding}")
+                    app_state.add_device_log(device_id, f"📋 计划步骤数: {total_steps}")
+                    steps = progress.get("steps", [])
+                    for i, s in enumerate(steps[:5]):  # 只显示前5步
+                        app_state.add_device_log(device_id, f"   {i+1}. {s.get('goal', '')}")
+                    if len(steps) > 5:
+                        app_state.add_device_log(device_id, f"   ... 还有 {len(steps)-5} 步")
+
+                elif phase == "executing":
+                    step_num = progress.get("step", 0)
+                    total = progress.get("total", 0)
+                    goal = progress.get("goal", "")
+                    app_state.set_device_status(device_id, f"🚀 执行中 ({step_num}/{total})")
+                    app_state.add_device_log(device_id, f"▶ 步骤 {step_num}/{total}: {goal}")
+
+                elif phase == "step_completed":
+                    step_num = progress.get("step", 0)
+                    goal = progress.get("goal", "")
+                    actions = progress.get("actions", [])
+                    app_state.add_device_log(device_id, f"✅ 步骤 {step_num} 完成: {goal}")
+                    if actions:
+                        app_state.add_device_log(device_id, f"   动作: {', '.join(actions[:3])}")
+                    steps_executed = step_num
+
+                elif phase == "step_failed":
+                    step_num = progress.get("step", 0)
+                    goal = progress.get("goal", "")
+                    reason = progress.get("reason", "")
+                    is_critical = progress.get("critical", False)
+                    app_state.add_device_log(device_id, f"❌ 步骤 {step_num} 失败: {goal}")
+                    app_state.add_device_log(device_id, f"   原因: {reason}")
+                    if is_critical:
+                        app_state.add_device_log(device_id, "   ⚠️ 关键步骤失败，任务终止")
+
+                elif phase == "step_skipped":
+                    step_num = progress.get("step", 0)
+                    goal = progress.get("goal", "")
+                    reason = progress.get("reason", "")
+                    app_state.add_device_log(device_id, f"⏭ 步骤 {step_num} 跳过: {goal}")
+                    app_state.add_device_log(device_id, f"   原因: {reason}")
+
+                elif phase in ("completed", "stopped", "timeout", "error"):
+                    task_success = progress.get("success", False)
+                    message = progress.get("message", "")
+                    steps_completed = progress.get("steps_completed", 0)
+                    steps_failed = progress.get("steps_failed", 0)
+                    total_time = progress.get("total_time", 0)
+
+                    if task_success:
+                        app_state.set_device_status(device_id, "✅ 任务完成")
+                        app_state.add_device_log(device_id, f"✅ 任务完成: {message}")
+                    else:
+                        error_message = message
+                        if phase == "stopped":
+                            app_state.set_device_status(device_id, "⏹ 任务已停止")
+                        elif phase == "timeout":
+                            app_state.set_device_status(device_id, "⏱ 任务超时")
+                        else:
+                            app_state.set_device_status(device_id, f"❌ {message}")
+                        app_state.add_device_log(device_id, f"❌ 任务失败: {message}")
+
+                    app_state.add_device_log(device_id, f"📊 统计: 完成 {steps_completed} 步, 失败 {steps_failed} 步, 用时 {total_time:.1f}秒")
+                    steps_executed = steps_completed
+
+                    # 记录到历史
+                    app_state.task_history.finish_record(
+                        record_id=record.id,
+                        success=task_success,
+                        message=message,
+                        steps=steps_executed,
+                        error=error_message,
+                    )
+                    break
+
+        except Exception as e:
+            error_message = str(e)
+            app_state.add_device_log(device_id, f"任务执行错误: {error_message}")
+            app_state.set_device_status(device_id, f"❌ {e}")
             app_state.task_history.finish_record(
                 record_id=record.id,
                 success=False,
-                message=task_result.message,
-                steps=task_result.steps_executed,
-                error=task_result.message,
+                message=error_message,
+                steps=steps_executed,
+                error=error_message,
             )
             task_success = False
-            error_message = task_result.message
-        else:
-            app_state.set_device_status(device_id, "✅ 任务完成")
+        finally:
+            app_state.set_device_agent(device_id, None)
+
+    else:
+        # 传统执行模式
+        task_gen = agent.run_task(task)
+
+        try:
+            while True:
+                step_result = next(task_gen)
+                steps_executed += 1
+                if step_result.screenshot:
+                    app_state.set_device_screenshot(device_id, step_result.screenshot)
+                status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
+                app_state.set_device_status(device_id, status_text)
+        except StopIteration as stop:
+            task_result = stop.value
+            if task_result and not task_result.success:
+                app_state.set_device_status(device_id, f"❌ {task_result.message}")
+                app_state.task_history.finish_record(
+                    record_id=record.id,
+                    success=False,
+                    message=task_result.message,
+                    steps=task_result.steps_executed,
+                    error=task_result.message,
+                )
+                task_success = False
+                error_message = task_result.message
+            else:
+                app_state.set_device_status(device_id, "✅ 任务完成")
+                app_state.task_history.finish_record(
+                    record_id=record.id,
+                    success=True,
+                    message="任务完成",
+                    steps=task_result.steps_executed if task_result else steps_executed,
+                )
+                task_success = True
+        except Exception as e:
+            error_msg = str(e)
+            app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
+            app_state.set_device_status(device_id, f"❌ {e}")
             app_state.task_history.finish_record(
                 record_id=record.id,
-                success=True,
-                message="任务完成",
-                steps=task_result.steps_executed if task_result else steps_executed,
+                success=False,
+                message=error_msg,
+                steps=steps_executed,
+                error=error_msg,
             )
-            task_success = True
-    except Exception as e:
-        error_msg = str(e)
-        app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
-        app_state.set_device_status(device_id, f"❌ {e}")
-        app_state.task_history.finish_record(
-            record_id=record.id,
-            success=False,
-            message=error_msg,
-            steps=steps_executed,
-            error=error_msg,
-        )
-        task_success = False
-        error_message = error_msg
-    finally:
-        app_state.set_device_agent(device_id, None)
+            task_success = False
+            error_message = error_msg
+        finally:
+            app_state.set_device_agent(device_id, None)
 
     # 任务完成后执行AI分析（如果启用）
     if getattr(settings, 'enable_task_analysis', True):
@@ -2679,6 +2835,7 @@ def save_settings_form(
     action_delay: float,
     language: str,
     verbose: bool,
+    use_smart_executor: bool,
     assistant_api_base: str,
     assistant_api_key: str,
     assistant_model: str,
@@ -2694,6 +2851,7 @@ def save_settings_form(
     app_state.settings.action_delay = action_delay
     app_state.settings.language = language
     app_state.settings.verbose = verbose
+    app_state.settings.use_smart_executor = use_smart_executor
     app_state.settings.assistant_api_base = assistant_api_base
     app_state.settings.assistant_api_key = assistant_api_key
     app_state.settings.assistant_model = assistant_model
@@ -2839,25 +2997,28 @@ def create_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         gr.Markdown("### 🖥️ 屏幕操作")
 
-                        # MJPEG 实时流（独立于 Gradio 事件系统）
-                        stream_html = gr.HTML(value="", label="实时画面")
+                        # 定时器：始终活跃，自动刷新画面
+                        refresh_timer = gr.Timer(value=0.1, active=True)
 
-                        # 静态截图预览（用于点击操作）
+                        # 屏幕预览（只显示，不允许上传）
                         preview_image = gr.Image(
-                            label="屏幕预览（点击操作）",
+                            label="屏幕预览",
                             type="pil",
                             height=480,
-                            interactive=True,
+                            interactive=True,  # 需要 True 才能支持点击
+                            sources=[],  # 禁用上传功能
                         )
 
-
+                        # 状态显示
                         operation_status = gr.Textbox(label="", interactive=False, lines=1)
 
                         # 控制按钮
                         with gr.Row():
                             refresh_btn = gr.Button("🔄 截图")
-                            start_stream_btn = gr.Button("▶️ 实时", variant="primary")
-                            stop_stream_btn = gr.Button("⏹️ 停止")
+                            pause_btn = gr.Button("⏸️ 暂停")
+                            # 保留旧变量名以兼容其他代码
+                            start_stream_btn = gr.Button("▶️ 实时", visible=False)
+                            stop_stream_btn = gr.Button("⏹️ 停止", visible=False)
 
                         # 导航按钮
                         with gr.Row():
@@ -3261,106 +3422,93 @@ def create_app() -> gr.Blocks:
                 ],
             )
 
-            # 屏幕操作
+            # ===== 屏幕操作事件 =====
+
+            # 手动截图按钮
             refresh_btn.click(
                 fn=refresh_screenshot,
                 outputs=[preview_image],
                 queue=False,
             )
 
-            # 实时模式控制（MJPEG 流独立于 Gradio）
-            start_stream_btn.click(
-                fn=handle_start_stream,
-                outputs=[operation_status, stream_html, preview_image],
+            # 暂停/继续按钮
+            def toggle_pause():
+                capture = get_remote_capture()
+                if capture.is_paused():
+                    capture.resume()
+                    return "▶️ 已继续", "⏸️ 暂停"
+                else:
+                    capture.pause()
+                    return "⏸️ 已暂停", "▶️ 继续"
+
+            pause_btn.click(
+                fn=toggle_pause,
+                outputs=[operation_status, pause_btn],
                 queue=False,
             )
 
-            stop_stream_btn.click(
-                fn=handle_stop_stream,
-                outputs=[operation_status, stream_html, preview_image],
+            # 定时器刷新画面（始终活跃）
+            def auto_refresh_frame():
+                """自动刷新帧 - Timer 回调"""
+                capture = get_remote_capture()
+                if not capture.is_running():
+                    return gr.update()
+                if capture.is_paused():
+                    return gr.update()
+                frame = capture.get_frame_if_new()
+                if frame:
+                    return frame
+                return gr.update()
+
+            refresh_timer.tick(
+                fn=auto_refresh_frame,
+                outputs=[preview_image],
                 queue=False,
             )
 
-            # 操作后延迟刷新截图的函数
-            def delayed_refresh():
-                time.sleep(0.3)  # 等待操作生效
-                return get_stream_frame() or refresh_screenshot()
-
-            # 截图点击
+            # 截图点击（Timer 会自动刷新，不需要手动刷新）
             preview_image.select(
                 fn=handle_screen_click,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
 
-            # 导航按钮
+            # 导航按钮（Timer 会自动刷新）
             back_btn.click(
                 fn=handle_back,
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
             home_btn.click(
                 fn=handle_home,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             recent_btn.click(
                 fn=handle_recent,
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
 
-            # 滑动按钮
+            # 滑动按钮（Timer 会自动刷新）
             swipe_up_btn.click(
                 fn=lambda: handle_swipe("up"),
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
             swipe_down_btn.click(
                 fn=lambda: handle_swipe("down"),
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             swipe_left_btn.click(
                 fn=lambda: handle_swipe("left"),
                 outputs=[operation_status],
                 queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
-                queue=False,
             )
             swipe_right_btn.click(
                 fn=lambda: handle_swipe("right"),
                 outputs=[operation_status],
-                queue=False,
-            ).then(
-                fn=delayed_refresh,
-                outputs=[preview_image],
                 queue=False,
             )
 
@@ -3611,6 +3759,13 @@ def create_app() -> gr.Blocks:
                         )
                         verbose = gr.Checkbox(label="详细日志", value=True)
 
+                        gr.Markdown("### 智能执行")
+                        use_smart_executor = gr.Checkbox(
+                            label="🧠 启用智能执行器",
+                            value=False,
+                            info="任务分解 + 步骤验证 + 异常处理（实验性功能）"
+                        )
+
                         gr.Markdown("### ADB状态")
                         adb_status = gr.Textbox(label="ADB状态", interactive=False)
                         check_adb_btn = gr.Button("检查ADB")
@@ -3635,7 +3790,7 @@ def create_app() -> gr.Blocks:
                     inputs=[
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
-                        max_steps, action_delay, language, verbose,
+                        max_steps, action_delay, language, verbose, use_smart_executor,
                         assistant_api_base, assistant_api_key, assistant_model, assistant_require_confirmation,
                     ],
                     outputs=[settings_status],
@@ -3654,6 +3809,7 @@ def create_app() -> gr.Blocks:
                         s.action_delay,
                         s.language,
                         s.verbose,
+                        s.use_smart_executor,
                         s.assistant_api_base,
                         s.assistant_api_key,
                         s.assistant_model,
@@ -3665,7 +3821,7 @@ def create_app() -> gr.Blocks:
                     outputs=[
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
-                        max_steps, action_delay, language, verbose,
+                        max_steps, action_delay, language, verbose, use_smart_executor,
                         assistant_api_base, assistant_api_key, assistant_model, assistant_require_confirmation,
                     ],
                 )

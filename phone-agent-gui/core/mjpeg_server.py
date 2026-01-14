@@ -59,6 +59,7 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 
     def _handle_stream(self):
         """处理视频流请求"""
+        print("[MJPEG] 收到 /stream 请求")
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -70,10 +71,19 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         last_frame_id = 0
         loading_sent = False
         wait_start = time.time()
+        frame_count = 0
+        loop_count = 0
 
         try:
             while True:
+                loop_count += 1
+
+                # 每100次循环打印一次状态
+                if loop_count % 100 == 0:
+                    print(f"[MJPEG] 循环 #{loop_count}, running={streamer.is_running()}, frame_id={streamer._frame_id}, last_id={last_frame_id}")
+
                 if not streamer.is_running():
+                    print("[MJPEG] 等待 streamer 启动...")
                     time.sleep(0.1)
                     continue
 
@@ -83,20 +93,27 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                     if current_id > last_frame_id:
                         last_frame_id = current_id
                         self._send_frame(frame_bytes)
-                        loading_sent = False  # 收到真实帧后重置
+                        frame_count += 1
+                        if frame_count <= 5:
+                            print(f"[MJPEG] 发送帧 #{frame_count}, 大小: {len(frame_bytes)} 字节, frame_id={current_id}")
+                        loading_sent = False
                 else:
-                    # 没有帧时，每秒发送一次加载占位帧
                     if not loading_sent or (time.time() - wait_start) > 1.0:
+                        print("[MJPEG] 没有帧数据，发送 loading 占位帧")
                         loading_frame = self._create_loading_frame()
                         if loading_frame:
                             self._send_frame(loading_frame)
                             loading_sent = True
                             wait_start = time.time()
 
-                time.sleep(0.04)  # 25fps
+                time.sleep(0.04)
 
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            print(f"[MJPEG] 连接断开: {e}")
+        except Exception as e:
+            print(f"[MJPEG] 异常: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _send_frame(self, frame_bytes: bytes):
         """发送单帧"""
@@ -217,7 +234,7 @@ class MJPEGServer:
 
         for port in ports_to_try:
             try:
-                self._server = ReuseHTTPServer(('127.0.0.1', port), MJPEGHandler)
+                self._server = ReuseHTTPServer(('0.0.0.0', port), MJPEGHandler)
                 self._thread = threading.Thread(target=self._serve, daemon=True)
                 self._thread.start()
                 self._running = True
@@ -251,8 +268,12 @@ class MJPEGServer:
             self._server = None
 
     def get_stream_url(self) -> str:
-        """获取流地址"""
+        """获取流地址（本地访问用）"""
         return f"http://127.0.0.1:{self.port}/stream"
+
+    def get_stream_port(self) -> int:
+        """获取流端口（用于动态构建URL）"""
+        return self.port
 
     def is_running(self) -> bool:
         return self._running
