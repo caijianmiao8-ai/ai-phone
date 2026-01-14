@@ -416,6 +416,8 @@ class ExceptionHandler:
             # 验证码需要用户接管
             if self.takeover_callback:
                 self.takeover_callback("检测到验证码，请手动完成验证后继续")
+            # 等待用户完成验证（最多等待30秒）
+            time.sleep(30)
             return True
 
         # 获取处理策略
@@ -531,10 +533,20 @@ class StepExecutor:
         exceptions_handled = []
         exception_handle_count = 0  # 防止异常处理无限循环
         MAX_EXCEPTION_HANDLES = 5   # 最多处理5次异常
+        step_start_time = time.time()  # 步骤开始时间
 
         step.status = StepStatus.IN_PROGRESS
 
         while retry_count < step.max_retries:
+            # 检查步骤超时
+            if time.time() - step_start_time > step.timeout:
+                result.success = False
+                result.message = f"步骤超时（{step.timeout}秒）"
+                result.actions_taken = actions_taken
+                result.retries = retry_count
+                result.exceptions_handled = exceptions_handled
+                step.status = StepStatus.FAILED
+                return result
             # 1. 获取当前屏幕
             screenshot = capture_func()
             if not screenshot:
@@ -819,6 +831,16 @@ class SmartTaskExecutor:
                 "warnings": plan.warnings
             })
 
+            # 检查空计划
+            if not plan.steps:
+                self._log("任务分解失败：没有生成任何步骤")
+                return TaskResult(
+                    success=False,
+                    message="任务分解失败：没有生成任何步骤",
+                    total_time=time.time() - start_time,
+                    execution_log=execution_log
+                )
+
             # Phase 2: 逐步执行
             for i, step in enumerate(plan.steps):
                 if self._should_stop:
@@ -959,6 +981,20 @@ class SmartTaskExecutor:
                 "steps": [{"id": s.id, "goal": s.goal} for s in plan.steps]
             }
 
+            # 记录计划到 execution_log
+            execution_log.append({
+                "phase": "planning",
+                "understanding": plan.understanding,
+                "steps": [{"id": s.id, "goal": s.goal} for s in plan.steps],
+                "warnings": plan.warnings
+            })
+
+            # 检查空计划
+            if not plan.steps:
+                yield {"phase": "error", "success": False, "message": "任务分解失败：没有生成任何步骤"}
+                return TaskResult(success=False, message="任务分解失败：没有生成任何步骤",
+                                total_time=time.time() - start_time, execution_log=execution_log)
+
             # Phase 2: 执行
             for i, step in enumerate(plan.steps):
                 # 检查停止条件
@@ -985,6 +1021,17 @@ class SmartTaskExecutor:
 
                 # 更新异常历史
                 context.exception_history.extend(step_result.exceptions_handled)
+
+                # 记录步骤执行结果到 execution_log
+                execution_log.append({
+                    "phase": "execution",
+                    "step_id": step.id,
+                    "goal": step.goal,
+                    "success": step_result.success,
+                    "actions": step_result.actions_taken,
+                    "retries": step_result.retries,
+                    "exceptions": step_result.exceptions_handled
+                })
 
                 if step_result.success:
                     context.completed_steps.append(i)
