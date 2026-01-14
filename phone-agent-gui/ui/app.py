@@ -765,6 +765,8 @@ def scan_devices():
             gr.update(choices=[], value=None),
             gr.update(choices=[], value=[]),
             gr.update(choices=[], value=[]),
+            gr.update(choices=[], value=[]),
+            gr.update(choices=[], value=[]),
         )
 
     result_text = ""
