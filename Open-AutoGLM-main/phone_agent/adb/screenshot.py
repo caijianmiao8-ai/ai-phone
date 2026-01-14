@@ -37,53 +37,48 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
         If the screenshot fails (e.g., on sensitive screens like payment pages),
         a black fallback image is returned with is_sensitive=True.
     """
-    temp_path = os.path.join(tempfile.gettempdir(), f"screenshot_{uuid.uuid4()}.png")
     adb_prefix = _get_adb_prefix(device_id)
 
     try:
-        # Execute screenshot command
+        # Use exec-out screencap to get PNG data directly via pipe
+        # This is faster and more reliable than saving to device + pull
         result = subprocess.run(
-            adb_prefix + ["shell", "screencap", "-p", "/sdcard/tmp.png"],
+            adb_prefix + ["exec-out", "screencap", "-p"],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
         )
 
-        # Check for screenshot failure (sensitive screen)
-        output = result.stdout + result.stderr
-        if "Status: -1" in output or "Failed" in output:
-            return _create_fallback_screenshot(is_sensitive=True)
+        # Check for screenshot failure
+        if result.returncode != 0:
+            stderr_text = result.stderr.decode("utf-8", errors="replace")
+            if "Status: -1" in stderr_text or "Failed" in stderr_text:
+                return _create_fallback_screenshot(is_sensitive=True)
+            return _create_fallback_screenshot(is_sensitive=False)
 
-        # Pull screenshot to local temp path
-        subprocess.run(
-            adb_prefix + ["pull", "/sdcard/tmp.png", temp_path],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        )
+        # Verify we got valid PNG data
+        if not result.stdout or len(result.stdout) < 100:
+            return _create_fallback_screenshot(is_sensitive=False)
 
-        if not os.path.exists(temp_path):
+        # PNG header check
+        png_header = b'\x89PNG\r\n\x1a\n'
+        if result.stdout[:8] != png_header:
             return _create_fallback_screenshot(is_sensitive=False)
 
         # Read and encode image
-        img = Image.open(temp_path)
+        img = Image.open(BytesIO(result.stdout))
         width, height = img.size
 
         buffered = BytesIO()
         img.save(buffered, format="PNG")
         base64_data = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-        # Cleanup
-        os.remove(temp_path)
-
         return Screenshot(
             base64_data=base64_data, width=width, height=height, is_sensitive=False
         )
 
+    except subprocess.TimeoutExpired:
+        print(f"Screenshot error: Timeout after {timeout} seconds")
+        return _create_fallback_screenshot(is_sensitive=False)
     except Exception as e:
         print(f"Screenshot error: {e}")
         return _create_fallback_screenshot(is_sensitive=False)
