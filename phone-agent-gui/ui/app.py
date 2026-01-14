@@ -1883,6 +1883,9 @@ def execute_task_for_device(
         knowledge_manager=app_state.knowledge_manager if use_knowledge else None,
         use_knowledge_base=use_knowledge,
         takeover_callback=takeover_callback,
+        assistant_api_base=settings.assistant_api_base,
+        assistant_api_key=settings.assistant_api_key,
+        assistant_model=settings.assistant_model,
     )
 
     # 日志回调：同时记录到设备状态和历史记录
@@ -2894,6 +2897,9 @@ def test_api() -> str:
         api_key=settings.api_key,
         model_name=settings.model_name,
         device_type=settings.device_type,
+        assistant_api_base=settings.assistant_api_base,
+        assistant_api_key=settings.assistant_api_key,
+        assistant_model=settings.assistant_model,
     )
     success, message = agent.test_api_connection()
     return f"{'✅' if success else '❌'} {message}"

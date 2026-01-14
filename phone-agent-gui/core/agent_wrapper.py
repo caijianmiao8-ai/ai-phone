@@ -185,6 +185,9 @@ class AgentWrapper:
         max_duration_seconds: int = 0,  # 新增：时间限制（秒），0表示不限制
         auto_detect_duration: bool = True,  # 新增：是否从任务描述中自动检测时间
         takeover_callback: Optional[Callable[[str], None]] = None,  # 用户接管回调
+        assistant_api_base: Optional[str] = None,  # AI助手API地址（用于智能规划）
+        assistant_api_key: Optional[str] = None,  # AI助手API密钥
+        assistant_model: Optional[str] = None,  # AI助手模型名称
     ):
         self.api_base_url = api_base_url
         self.api_key = (api_key or "").strip()
@@ -201,6 +204,11 @@ class AgentWrapper:
         self.max_duration_seconds = max_duration_seconds
         self.auto_detect_duration = auto_detect_duration
         self.takeover_callback = takeover_callback
+
+        # AI助手配置（用于智能任务规划）
+        self.assistant_api_base = assistant_api_base
+        self.assistant_api_key = assistant_api_key
+        self.assistant_model = assistant_model
 
         self._agent = None
         self._is_running = False
