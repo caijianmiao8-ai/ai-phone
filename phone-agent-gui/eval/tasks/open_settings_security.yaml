@@ -1,0 +1,9 @@
+name: open_settings_security
+app: com.android.settings
+steps:
+  - name: open_security
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Security OR contains=安全"}
+    postcheck:
+      - "ui_contains:text=Security"

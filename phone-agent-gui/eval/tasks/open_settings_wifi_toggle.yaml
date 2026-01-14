@@ -1,0 +1,9 @@
+name: open_settings_wifi_toggle
+app: com.android.settings
+steps:
+  - name: open_wifi
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Wi-Fi"}
+    postcheck:
+      - "ui_contains:text=Wi-Fi"

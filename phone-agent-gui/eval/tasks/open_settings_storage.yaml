@@ -1,0 +1,9 @@
+name: open_settings_storage
+app: com.android.settings
+steps:
+  - name: open_storage
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Storage OR contains=存储"}
+    postcheck:
+      - "ui_contains:text=Storage"

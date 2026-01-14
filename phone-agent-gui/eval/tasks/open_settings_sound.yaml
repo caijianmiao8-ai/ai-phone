@@ -1,0 +1,9 @@
+name: open_settings_sound
+app: com.android.settings
+steps:
+  - name: open_sound
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Sound OR contains=声音"}
+    postcheck:
+      - "ui_contains:text=Sound"

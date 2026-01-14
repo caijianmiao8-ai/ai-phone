@@ -1,0 +1,9 @@
+name: open_settings_bluetooth
+app: com.android.settings
+steps:
+  - name: open_bluetooth
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Bluetooth"}
+    postcheck:
+      - "ui_contains:text=Bluetooth"

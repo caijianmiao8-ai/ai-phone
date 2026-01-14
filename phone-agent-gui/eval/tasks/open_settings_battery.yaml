@@ -1,0 +1,9 @@
+name: open_settings_battery
+app: com.android.settings
+steps:
+  - name: open_battery
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Battery OR contains=电池"}
+    postcheck:
+      - "ui_contains:text=Battery"

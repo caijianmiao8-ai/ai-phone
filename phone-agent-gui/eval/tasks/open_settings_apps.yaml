@@ -1,0 +1,9 @@
+name: open_settings_apps
+app: com.android.settings
+steps:
+  - name: open_apps
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Apps OR contains=应用"}
+    postcheck:
+      - "ui_contains:text=Apps"
