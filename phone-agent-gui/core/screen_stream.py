@@ -422,6 +422,18 @@ class ScreenStreamer:
                                 # 解析失败，回退到 PNG 模式
                                 use_raw = False
                                 continue
+                    else:
+                        # PNG 模式：需要转换为 JPEG（MJPEG 服务器需要 JPEG 格式）
+                        try:
+                            img = Image.open(io.BytesIO(frame_data))
+                            if img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            buffer = io.BytesIO()
+                            img.save(buffer, format='JPEG', quality=75)
+                            frame_data = buffer.getvalue()
+                        except Exception:
+                            # PNG 解析失败，跳过此帧
+                            continue
 
                     with self._frame_lock:
                         self._latest_frame = frame_data
