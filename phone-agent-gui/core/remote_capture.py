@@ -237,6 +237,9 @@ class RemoteScreenCapture:
         Args:
             worker_id: 线程编号（用于调试）
         """
+        print(f"[DEBUG] Worker {worker_id} started")
+        frame_count = 0
+
         while self._running:
             # 暂停状态：空转
             if self._paused:
@@ -270,17 +273,28 @@ class RemoteScreenCapture:
                         self._stats.total_frames += 1
                         self._stats.last_capture_time = time.time() - start_time
                         self._consecutive_errors = 0
+
+                        frame_count += 1
+                        # 每 10 帧打印一次
+                        if frame_count % 10 == 0:
+                            print(f"[DEBUG] Worker {worker_id} captured {frame_count} frames, frame_id={self._frame_id}")
                 else:
                     # 失败处理
                     self._consecutive_errors += 1
                     self._stats.error_count += 1
 
+                    if self._consecutive_errors <= 3:  # 前几次失败打印日志
+                        print(f"[DEBUG] Worker {worker_id} capture failed, consecutive_errors={self._consecutive_errors}")
+
                     if self._consecutive_errors >= self._max_consecutive_errors:
                         self._stats.last_error = "连续截图失败，请检查设备连接"
+                        print(f"[DEBUG] Worker {worker_id} reached max consecutive errors")
                         time.sleep(self._error_backoff)
 
             finally:
                 self._semaphore.release()
+
+        print(f"[DEBUG] Worker {worker_id} stopped, total frames={frame_count}")
 
     def start(self, device_id: str) -> Tuple[bool, str, Optional[Image.Image]]:
         """
@@ -292,20 +306,26 @@ class RemoteScreenCapture:
         Returns:
             (成功, 消息, 首帧图片)
         """
+        print(f"[DEBUG] RemoteCapture.start called for device {device_id}")
+
         if self._running:
+            print(f"[DEBUG] RemoteCapture already running, stopping first")
             self.stop()
 
         self._device_id = device_id
 
         # 验证设备
         ok, msg = self._verify_device()
+        print(f"[DEBUG] RemoteCapture device verification: ok={ok}, msg={msg}")
         if not ok:
             return False, msg, None
 
         # 获取首帧（同步，确保有画面）
+        print(f"[DEBUG] RemoteCapture capturing first frame...")
         first_frame = None
         png_data = self._capture_one_frame()
         if png_data:
+            print(f"[DEBUG] RemoteCapture got PNG data, size={len(png_data)} bytes")
             jpeg_data, img = self._process_frame(png_data)
             if img:
                 with self._frame_lock:
@@ -313,6 +333,9 @@ class RemoteScreenCapture:
                     self._latest_image = img
                     self._frame_id += 1
                 first_frame = img
+                print(f"[DEBUG] RemoteCapture first frame processed, size={img.size}")
+        else:
+            print(f"[DEBUG] RemoteCapture failed to get first frame PNG data")
 
         if not first_frame:
             return False, "无法获取首帧截图", None
@@ -336,6 +359,7 @@ class RemoteScreenCapture:
             worker.start()
             self._workers.append(worker)
 
+        print(f"[DEBUG] RemoteCapture started with {self._num_workers} workers")
         return True, "捕获已启动", first_frame
 
     def stop(self) -> Tuple[bool, str]:

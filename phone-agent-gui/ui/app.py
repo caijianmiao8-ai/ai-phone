@@ -828,16 +828,25 @@ Android: {info.get('android_version') or '未知'}"""
     # 启动远程捕获（自动刷新）
     screenshot = None
     if info.get("is_online"):
+        print(f"[DEBUG] select_device: device {device_id} is online, starting capture")
         capture = get_remote_capture()
         success, msg, first_frame = capture.start(device_id)
+        print(f"[DEBUG] select_device: capture.start result - success={success}, msg={msg}, has_frame={first_frame is not None}")
         if success and first_frame:
             screenshot = first_frame
+            print(f"[DEBUG] select_device: got first frame, size={first_frame.size}")
         else:
             # 回退到单次截图
+            print(f"[DEBUG] select_device: fallback to single screenshot")
             success, data = app_state.device_manager.take_screenshot(device_id)
             if success and data:
                 app_state.current_screenshot = data
                 screenshot = Image.open(io.BytesIO(data))
+                print(f"[DEBUG] select_device: fallback screenshot success, size={screenshot.size}")
+            else:
+                print(f"[DEBUG] select_device: fallback screenshot failed")
+    else:
+        print(f"[DEBUG] select_device: device {device_id} is not online")
 
     return (
         info_text,
@@ -850,8 +859,12 @@ Android: {info.get('android_version') or '未知'}"""
 
 def auto_select_device() -> Tuple[str, str, str, bool, Optional[Image.Image]]:
     """自动选择当前设备（用于初始加载）"""
+    print(f"[DEBUG] auto_select_device called, current_device={app_state.current_device}")
     if app_state.current_device:
-        return select_device(app_state.current_device)
+        result = select_device(app_state.current_device)
+        print(f"[DEBUG] auto_select_device completed, has_screenshot={result[4] is not None}")
+        return result
+    print("[DEBUG] auto_select_device: no device to select")
     return "请先选择一个设备", "", "", False, None
 
 
@@ -3462,15 +3475,30 @@ def create_app() -> gr.Blocks:
             )
 
             # 定时器刷新画面（始终活跃）
+            _refresh_count = [0]  # 使用列表以便在闭包中修改
             def auto_refresh_frame():
                 """自动刷新帧 - Timer 回调"""
+                _refresh_count[0] += 1
                 capture = get_remote_capture()
-                if not capture.is_running():
+                is_running = capture.is_running()
+                is_paused = capture.is_paused()
+
+                # 每 50 次打印一次状态（减少日志量）
+                if _refresh_count[0] % 50 == 0:
+                    print(f"[DEBUG] auto_refresh_frame #{_refresh_count[0]}: running={is_running}, paused={is_paused}")
+
+                if not is_running:
+                    if _refresh_count[0] <= 3:  # 前 3 次打印
+                        print(f"[DEBUG] auto_refresh_frame: capture not running")
                     return gr.update()
-                if capture.is_paused():
+                if is_paused:
+                    if _refresh_count[0] % 50 == 0:
+                        print(f"[DEBUG] auto_refresh_frame: capture paused")
                     return gr.update()
+
                 frame = capture.get_frame_if_new()
                 if frame:
+                    print(f"[DEBUG] auto_refresh_frame #{_refresh_count[0]}: got new frame, size={frame.size}")
                     return frame
                 return gr.update()
 
