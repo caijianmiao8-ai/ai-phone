@@ -1,6 +1,6 @@
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, root_validator, validator
+from pydantic import BaseModel, Field, model_validator, validator
 
 
 ActionType = Literal["tap", "swipe", "type", "back", "home", "wait", "finish"]
@@ -33,19 +33,16 @@ class ActionSchema(BaseModel):
     risk: RiskType = "low"
     rationale_short: str = ""
 
-    @root_validator
-    def _validate_action_requirements(cls, values):
-        action = values.get("action")
-        target = values.get("target")
-        args = values.get("args")
-        if action == "tap" and not target:
+    @model_validator(mode="after")
+    def _validate_action_requirements(self):
+        if self.action == "tap" and not self.target:
             raise ValueError("tap action requires target")
-        if action == "type" and not (args and args.text):
+        if self.action == "type" and not self.args.text:
             raise ValueError("type action requires args.text")
-        if action == "swipe":
-            if not (args and args.direction and args.distance is not None):
+        if self.action == "swipe":
+            if not (self.args.direction and self.args.distance is not None):
                 raise ValueError("swipe action requires direction and distance")
-        return values
+        return self
 
     @validator("target")
     def _validate_target_spec(cls, value, values):
