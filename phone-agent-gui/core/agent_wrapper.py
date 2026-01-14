@@ -728,27 +728,14 @@ class AgentWrapper:
             planner_api_client = None
             if self.assistant_api_base and self.assistant_api_key:
                 def planner_api(prompt: str, image_base64: Optional[str] = None) -> str:
+                    """规划 API 调用（仅使用文本，不需要图像）"""
                     from openai import OpenAI
                     client = OpenAI(
                         base_url=self.assistant_api_base,
                         api_key=self.assistant_api_key,
                     )
-                    messages = []
-                    if image_base64:
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{image_base64}"
-                                    }
-                                }
-                            ]
-                        })
-                    else:
-                        messages.append({"role": "user", "content": prompt})
+                    # 任务规划只需要文本描述，不需要图像
+                    messages = [{"role": "user", "content": prompt}]
 
                     response = client.chat.completions.create(
                         model=self.assistant_model,
