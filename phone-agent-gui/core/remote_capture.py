@@ -161,6 +161,7 @@ class RemoteScreenCapture:
             PNG 图像字节，失败返回 None
         """
         if not self._adb_path or not self._device_id:
+            print(f"[DEBUG] _capture_one_frame: missing adb_path={self._adb_path} or device_id={self._device_id}")
             return None
 
         cmd = [
@@ -182,24 +183,34 @@ class RemoteScreenCapture:
                 **kwargs
             )
 
+            print(f"[DEBUG] _capture_one_frame: returncode={result.returncode}, stdout_len={len(result.stdout) if result.stdout else 0}, stderr={result.stderr[:100] if result.stderr else b''}")
+
             if result.returncode == 0 and result.stdout:
                 # 验证是有效的 PNG (头部: 89 50 4E 47 0D 0A 1A 0A)
                 png_header = b'\x89PNG\r\n\x1a\n'
+                actual_header = result.stdout[:8] if len(result.stdout) >= 8 else result.stdout
+                print(f"[DEBUG] _capture_one_frame: PNG header check - expected={png_header.hex()}, actual={actual_header.hex()}")
+
                 if result.stdout[:8] == png_header:
+                    print(f"[DEBUG] _capture_one_frame: PNG valid, returning {len(result.stdout)} bytes")
                     return result.stdout
 
                 # 某些环境可能破坏二进制数据，尝试检测并跳过
                 # 如果不是有效 PNG 但有数据，记录错误
                 if len(result.stdout) > 100:
                     self._stats.last_error = "截图数据格式异常"
+                    print(f"[DEBUG] _capture_one_frame: PNG header mismatch but has data")
 
+            print(f"[DEBUG] _capture_one_frame: returning None")
             return None
 
         except subprocess.TimeoutExpired:
             self._stats.last_error = "截图超时"
+            print(f"[DEBUG] _capture_one_frame: timeout after {self._timeout}s")
             return None
         except Exception as e:
             self._stats.last_error = str(e)
+            print(f"[DEBUG] _capture_one_frame: exception {e}")
             return None
 
     def _process_frame(self, png_data: bytes) -> Tuple[Optional[bytes], Optional[Image.Image]]:
