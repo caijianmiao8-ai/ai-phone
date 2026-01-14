@@ -716,6 +716,41 @@ class AgentWrapper:
                     result += f"## {item.title}\n{item.content}\n\n"
                 return result
 
+            # 创建规划专用 API 客户端（使用 AI 助手配置）
+            planner_api_client = None
+            if self.assistant_api_base and self.assistant_api_key:
+                def planner_api(prompt: str, image_base64: Optional[str] = None) -> str:
+                    from openai import OpenAI
+                    client = OpenAI(
+                        base_url=self.assistant_api_base,
+                        api_key=self.assistant_api_key,
+                    )
+                    messages = []
+                    if image_base64:
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{image_base64}"
+                                    }
+                                }
+                            ]
+                        })
+                    else:
+                        messages.append({"role": "user", "content": prompt})
+
+                    response = client.chat.completions.create(
+                        model=self.assistant_model,
+                        messages=messages,
+                        max_tokens=4096,  # 规划需要更多 tokens
+                        temperature=0.3,  # 规划需要更稳定的输出
+                    )
+                    return response.choices[0].message.content or ""
+                planner_api_client = planner_api
+
             # 创建智能执行器
             executor = SmartTaskExecutor(
                 api_client=api_client,
@@ -723,7 +758,8 @@ class AgentWrapper:
                 capture_func=capture_func,
                 knowledge_search_func=knowledge_search_func if self.use_knowledge_base else None,
                 takeover_callback=self.takeover_callback,
-                on_log_callback=self.on_log_callback
+                on_log_callback=self.on_log_callback,
+                planner_api_client=planner_api_client  # 使用更强的模型做规划
             )
 
             # 流式执行

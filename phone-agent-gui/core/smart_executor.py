@@ -279,20 +279,35 @@ class TaskPlanner:
             )
 
     def _parse_plan_response(self, response: str) -> TaskPlan:
-        """解析 AI 返回的计划"""
-        # 尝试提取 JSON
+        """解析 AI 返回的计划（增强容错）"""
+        # 策略1: 尝试提取 ```json...``` 代码块
         json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
-            # 尝试直接解析
+            # 策略2: 尝试提取任何 {...} 结构
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
                 json_str = json_match.group(0)
             else:
-                raise ValueError("无法从响应中提取 JSON")
+                # 策略3: 尝试查找包含 steps 的 JSON 片段
+                steps_match = re.search(r'\{[^}]*"steps"\s*:\s*\[[\s\S]*?\]\s*[^}]*\}', response, re.DOTALL)
+                if steps_match:
+                    json_str = steps_match.group(0)
+                else:
+                    raise ValueError("无法从响应中提取 JSON")
 
-        data = json.loads(json_str)
+        # 清理 JSON 字符串（移除注释、尾随逗号等）
+        json_str = self._clean_json_string(json_str)
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print(f"[DEBUG] _parse_plan_response: JSON decode error - {e}")
+            print(f"[DEBUG] _parse_plan_response: attempted to parse: {json_str[:200]}")
+            # 尝试修复常见问题
+            json_str = self._fix_common_json_issues(json_str)
+            data = json.loads(json_str)  # 再次尝试
 
         steps = []
         for step_data in data.get("steps", []):
@@ -312,6 +327,27 @@ class TaskPlanner:
             estimated_actions=data.get("estimated_actions", len(steps) * 3),
             warnings=data.get("warnings", [])
         )
+
+    def _clean_json_string(self, json_str: str) -> str:
+        """清理 JSON 字符串"""
+        # 移除 JavaScript 风格的注释
+        json_str = re.sub(r'//.*$', '', json_str, flags=re.MULTILINE)
+        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
+        # 移除尾随逗号（在数组或对象最后一个元素后）
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+        return json_str
+
+    def _fix_common_json_issues(self, json_str: str) -> str:
+        """修复常见的 JSON 问题"""
+        # 修复单引号
+        json_str = json_str.replace("'", '"')
+        # 修复 Python 风格的 True/False/None
+        json_str = re.sub(r'\bTrue\b', 'true', json_str)
+        json_str = re.sub(r'\bFalse\b', 'false', json_str)
+        json_str = re.sub(r'\bNone\b', 'null', json_str)
+        # 确保键名有引号
+        json_str = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_str)
+        return json_str
 
 
 # ==================== 异常处理器 ====================
@@ -773,19 +809,21 @@ class SmartTaskExecutor:
         knowledge_search_func: Optional[Callable[[str], str]] = None,
         takeover_callback: Optional[Callable[[str], None]] = None,
         on_step_callback: Optional[Callable[[int, int, str, str], None]] = None,
-        on_log_callback: Optional[Callable[[str], None]] = None
+        on_log_callback: Optional[Callable[[str], None]] = None,
+        planner_api_client: Optional[Callable[[str, Optional[str]], str]] = None
     ):
         """
         初始化智能任务执行器
 
         Args:
-            api_client: AI API 调用函数 (prompt, image_base64) -> response
+            api_client: AI API 调用函数 (prompt, image_base64) -> response (用于执行)
             execute_func: 执行操作函数 (instruction) -> (success, message)
             capture_func: 截图函数 () -> base64_string
             knowledge_search_func: 知识库搜索函数 (query) -> knowledge_text
             takeover_callback: 用户接管回调
             on_step_callback: 步骤进度回调 (current, total, step_goal, status)
             on_log_callback: 日志回调
+            planner_api_client: 任务规划专用 API 客户端（可选，默认使用 api_client）
         """
         self.api_client = api_client
         self.execute_func = execute_func
@@ -796,7 +834,8 @@ class SmartTaskExecutor:
         self.on_log_callback = on_log_callback
 
         # 初始化子模块
-        self.planner = TaskPlanner(api_client)
+        # 规划器使用更强的模型（如果提供）
+        self.planner = TaskPlanner(planner_api_client or api_client)
         self.exception_handler = ExceptionHandler(
             api_client, execute_func, takeover_callback
         )
