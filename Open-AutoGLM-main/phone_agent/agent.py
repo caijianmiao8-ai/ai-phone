@@ -23,14 +23,12 @@ def compute_screen_hash(base64_data: str) -> str:
 @dataclass
 class AgentConfig:
     """Configuration for the PhoneAgent."""
-
     max_steps: int = 100
     device_id: str | None = None
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
-    # 新增：时间限制（秒），0表示不限制
-    max_duration_seconds: int = 0
+    max_duration_seconds: int = 0  # 时间限制（秒），0表示不限制
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -40,7 +38,6 @@ class AgentConfig:
 @dataclass
 class StepResult:
     """Result of a single agent step."""
-
     success: bool
     finished: bool
     action: dict[str, Any] | None
@@ -49,155 +46,206 @@ class StepResult:
 
 
 @dataclass
-class StepRecord:
-    """单步执行记录"""
+class ActionRecord:
+    """单步操作记录，用于循环检测"""
     step_id: int
-    action_desc: str  # 操作描述
-    result: str  # 结果：success/no_change/error
+    action_type: str          # Tap, Swipe, Type, etc.
+    action_params: str        # 参数摘要，如坐标
+    screen_hash_before: str   # 操作前屏幕哈希
+    screen_hash_after: str    # 操作后屏幕哈希
     screen_changed: bool
 
 
 @dataclass
 class ExecutionContext:
-    """执行上下文，用于跟踪任务状态"""
+    """执行上下文，用于跟踪任务状态和检测循环"""
     task: str = ""
     start_time: float = field(default_factory=time.time)
     max_duration_seconds: int = 0
     step_count: int = 0
     max_steps: int = 100
 
-    # 新增：操作反馈和历史记录
-    last_action_feedback: str = ""  # 上一步操作的反馈
-    last_screen_hash: str = ""  # 上一步的屏幕哈希
-    consecutive_no_change: int = 0  # 连续无变化次数
-    step_history: List[StepRecord] = field(default_factory=list)  # 执行历史
+    # 操作历史（用于循环检测）
+    action_history: List[ActionRecord] = field(default_factory=list)
+    screen_hash_history: List[str] = field(default_factory=list)  # 所有出现过的屏幕哈希
+
+    # 结构化任务状态
+    milestones: List[str] = field(default_factory=list)  # 已完成的里程碑
+    current_stage: str = ""  # 当前阶段描述
+
+    # 循环检测状态
+    loop_warning: str = ""  # 循环警告信息
+    intervention_action: dict | None = None  # 需要强制执行的干预操作
 
     def get_elapsed_seconds(self) -> int:
-        """获取已执行时间（秒）"""
         return int(time.time() - self.start_time)
 
     def get_remaining_seconds(self) -> int:
-        """获取剩余时间（秒），-1表示无限制"""
         if self.max_duration_seconds <= 0:
             return -1
-        remaining = self.max_duration_seconds - self.get_elapsed_seconds()
-        return max(0, remaining)
+        return max(0, self.max_duration_seconds - self.get_elapsed_seconds())
 
     def is_time_exceeded(self) -> bool:
-        """检查是否超时"""
         if self.max_duration_seconds <= 0:
             return False
         return self.get_elapsed_seconds() >= self.max_duration_seconds
 
-    def record_step(self, action_desc: str, screen_changed: bool):
-        """记录一步执行"""
-        result = "success" if screen_changed else "no_change"
-        record = StepRecord(
+    def record_action(self, action: dict, hash_before: str, hash_after: str) -> None:
+        """记录操作，用于后续循环检测"""
+        action_type = action.get("action", "unknown")
+
+        # 提取关键参数
+        if action_type == "Tap":
+            params = str(action.get("element", []))
+        elif action_type == "Swipe":
+            params = f"{action.get('start', [])} -> {action.get('end', [])}"
+        elif action_type == "Type":
+            text = action.get("text", "")
+            params = text[:20] + "..." if len(text) > 20 else text
+        elif action_type == "Launch":
+            params = action.get("app", "")
+        else:
+            params = ""
+
+        record = ActionRecord(
             step_id=self.step_count,
-            action_desc=action_desc,
-            result=result,
-            screen_changed=screen_changed,
+            action_type=action_type,
+            action_params=params,
+            screen_hash_before=hash_before,
+            screen_hash_after=hash_after,
+            screen_changed=(hash_before != hash_after),
         )
-        self.step_history.append(record)
+        self.action_history.append(record)
 
-        # 更新连续无变化计数
-        if screen_changed:
-            self.consecutive_no_change = 0
-        else:
-            self.consecutive_no_change += 1
+        # 记录屏幕哈希历史
+        if hash_after not in self.screen_hash_history:
+            self.screen_hash_history.append(hash_after)
 
-    def update_action_feedback(self, screen_hash_before: str, screen_hash_after: str, action_name: str):
-        """更新操作反馈"""
-        self.last_screen_hash = screen_hash_after
+    def detect_loop(self) -> str:
+        """
+        检测操作循环，返回警告信息
 
-        if screen_hash_before == screen_hash_after:
-            self.consecutive_no_change += 1
-            if self.consecutive_no_change >= 3:
-                self.last_action_feedback = f"⚠️【操作反馈】连续 {self.consecutive_no_change} 次操作后屏幕无变化！请检查：1)操作是否正确 2)是否需要等待加载 3)是否需要换一种方式"
-            elif self.consecutive_no_change >= 2:
-                self.last_action_feedback = f"⚠️【操作反馈】上一步 {action_name} 后屏幕无变化（连续{self.consecutive_no_change}次），建议：检查点击位置是否正确，或等待页面加载"
-            else:
-                self.last_action_feedback = f"【操作反馈】上一步 {action_name} 后屏幕无变化，可能需要等待或调整操作"
-        else:
-            self.consecutive_no_change = 0
-            self.last_action_feedback = f"✓【操作反馈】上一步 {action_name} 已生效，屏幕已更新"
+        检测策略：
+        1. 重复操作：连续N次相同类型+相似参数的操作
+        2. 状态循环：屏幕哈希回到之前出现过的状态
+        3. 无效操作：连续N次屏幕无变化
+        """
+        self.loop_warning = ""
+        self.intervention_action = None
 
-    def get_history_summary(self, max_recent: int = 5) -> str:
-        """获取历史摘要"""
-        if not self.step_history:
+        if len(self.action_history) < 3:
             return ""
 
-        recent = self.step_history[-max_recent:]
-        lines = ["【最近操作】"]
-        for record in recent:
-            status = "✓" if record.screen_changed else "✗"
-            lines.append(f"  {status} 步骤{record.step_id}: {record.action_desc}")
+        recent = self.action_history[-5:]  # 最近5步
 
-        # 统计成功率
-        total = len(self.step_history)
-        success = sum(1 for r in self.step_history if r.screen_changed)
-        if total > 5:
-            lines.append(f"  (共 {total} 步，{success} 步生效)")
+        # 检测1：连续无变化
+        no_change_count = sum(1 for r in recent if not r.screen_changed)
+        if no_change_count >= 3:
+            self.loop_warning = f"⚠️【循环警告】最近 {len(recent)} 步中有 {no_change_count} 步屏幕无变化，可能陷入无效循环"
+            if no_change_count >= 4:
+                # 强制干预：返回上一页
+                self.intervention_action = {"action": "Back", "_intervention": True}
+                self.loop_warning += "\n🔄【自动干预】将执行 Back 返回，尝试重置状态"
+            return self.loop_warning
 
-        return "\n".join(lines)
+        # 检测2：重复相同操作
+        if len(recent) >= 3:
+            last_3 = recent[-3:]
+            same_type = all(r.action_type == last_3[0].action_type for r in last_3)
+            same_params = all(r.action_params == last_3[0].action_params for r in last_3)
+            if same_type and same_params and last_3[0].action_type in ["Tap", "Swipe"]:
+                self.loop_warning = f"⚠️【循环警告】连续 3 次执行相同的 {last_3[0].action_type} 操作 ({last_3[0].action_params})，请换一种方式"
+                return self.loop_warning
 
-    def build_context_hint(self) -> str:
-        """构建上下文提示，注入到每一步"""
-        elapsed = self.get_elapsed_seconds()
-        remaining = self.get_remaining_seconds()
+        # 检测3：状态循环（回到之前的屏幕）
+        if len(self.action_history) >= 2:
+            current_hash = self.action_history[-1].screen_hash_after
+            # 检查是否回到了5步之前出现过的状态
+            for i, record in enumerate(self.action_history[:-5]):
+                if record.screen_hash_after == current_hash:
+                    self.loop_warning = f"⚠️【循环警告】当前屏幕状态与第 {record.step_id} 步相同，可能在原地循环"
+                    return self.loop_warning
 
-        # 提取原始任务描述（去除知识库增强部分）
+        return ""
+
+    def add_milestone(self, milestone: str) -> None:
+        """添加已完成的里程碑"""
+        if milestone and milestone not in self.milestones:
+            self.milestones.append(milestone)
+
+    def set_current_stage(self, stage: str) -> None:
+        """设置当前阶段"""
+        self.current_stage = stage
+
+    def build_task_state(self) -> str:
+        """
+        构建结构化任务状态，注入到每一步
+        这是解决长任务精度下降的关键
+        """
+        lines = []
+
+        # 1. 原始任务（始终保留，但截断过长的部分）
         task_desc = self.task
         if "=====" in task_desc:
             task_desc = task_desc.split("=====")[0].strip()
-        # 限制长度，避免上下文过大
-        if len(task_desc) > 100:
-            task_desc = task_desc[:100] + "..."
+        if len(task_desc) > 150:
+            task_desc = task_desc[:150] + "..."
+        lines.append(f"【任务目标】{task_desc}")
 
-        hints = []
-        hints.append(f"【当前任务】{task_desc}")
-        hints.append(f"【执行进度】第 {self.step_count} 步 / 最多 {self.max_steps} 步")
+        # 2. 已完成的里程碑
+        if self.milestones:
+            lines.append(f"【已完成】{' → '.join(self.milestones)}")
 
-        # 添加操作反馈（关键改进）
-        if self.last_action_feedback:
-            hints.append(self.last_action_feedback)
+        # 3. 当前阶段
+        if self.current_stage:
+            lines.append(f"【当前阶段】{self.current_stage}")
 
+        # 4. 执行进度
+        lines.append(f"【进度】第 {self.step_count} 步 / 最多 {self.max_steps} 步")
+
+        # 5. 时间状态（如果有限制）
         if self.max_duration_seconds > 0:
-            elapsed_min = elapsed // 60
-            elapsed_sec = elapsed % 60
+            remaining = self.get_remaining_seconds()
             remaining_min = remaining // 60
             remaining_sec = remaining % 60
-            hints.append(f"【时间状态】已执行 {elapsed_min}分{elapsed_sec}秒，剩余约 {remaining_min}分{remaining_sec}秒")
-
-            # 时间提醒
+            lines.append(f"【剩余时间】{remaining_min}分{remaining_sec}秒")
             if remaining < 30:
-                hints.append("⚠️ 时间即将结束，请尽快完成当前操作并调用 finish() 结束任务")
-            elif remaining < 60:
-                hints.append("⏰ 剩余时间不足1分钟，请准备结束任务")
+                lines.append("⚠️ 时间即将结束，请尽快完成")
 
-        return "\n".join(hints)
+        # 6. 最近操作摘要（最近3步）
+        if self.action_history:
+            recent = self.action_history[-3:]
+            recent_desc = []
+            for r in recent:
+                status = "✓" if r.screen_changed else "✗"
+                recent_desc.append(f"{status}{r.action_type}")
+            lines.append(f"【最近操作】{' → '.join(recent_desc)}")
+
+        # 7. 循环警告（如果有）
+        if self.loop_warning:
+            lines.append(self.loop_warning)
+
+        return "\n".join(lines)
+
+    def extract_milestone_from_thinking(self, thinking: str) -> None:
+        """
+        从 LLM 的思考中提取里程碑
+        LLM 可以在 think 中用 [里程碑:xxx] 标记完成的关键步骤
+        """
+        import re
+        matches = re.findall(r'\[里程碑[：:]\s*([^\]]+)\]', thinking)
+        for m in matches:
+            self.add_milestone(m.strip())
+
+        # 也提取当前阶段
+        stage_match = re.search(r'\[阶段[：:]\s*([^\]]+)\]', thinking)
+        if stage_match:
+            self.set_current_stage(stage_match.group(1).strip())
 
 
 class PhoneAgent:
     """
     AI-powered agent for automating Android phone interactions.
-
-    The agent uses a vision-language model to understand screen content
-    and decide on actions to complete user tasks.
-
-    Args:
-        model_config: Configuration for the AI model.
-        agent_config: Configuration for the agent behavior.
-        confirmation_callback: Optional callback for sensitive action confirmation.
-        takeover_callback: Optional callback for takeover requests.
-
-    Example:
-        >>> from phone_agent import PhoneAgent
-        >>> from phone_agent.model import ModelConfig
-        >>>
-        >>> model_config = ModelConfig(base_url="http://localhost:8000/v1")
-        >>> agent = PhoneAgent(model_config)
-        >>> agent.run("Open WeChat and send a message to John")
     """
 
     def __init__(
@@ -220,21 +268,14 @@ class PhoneAgent:
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
         self._exec_context: ExecutionContext | None = None
-        self._last_screen_hash: str = ""  # 上一步截图哈希
-        self._max_context_messages: int = 20  # 最大上下文消息数
+        self._last_screen_hash: str = ""
+        self._max_context_messages: int = 20
 
     def run(self, task: str) -> str:
-        """
-        Run the agent to complete a task.
-
-        Args:
-            task: Natural language description of the task.
-
-        Returns:
-            Final message from the agent.
-        """
+        """Run the agent to complete a task."""
         self._context = []
         self._step_count = 0
+        self._last_screen_hash = ""
         self._exec_context = ExecutionContext(
             task=task,
             start_time=time.time(),
@@ -242,15 +283,12 @@ class PhoneAgent:
             max_steps=self.agent_config.max_steps,
         )
 
-        # First step with user prompt
         result = self._execute_step(task, is_first=True)
 
         if result.finished:
             return result.message or "Task completed"
 
-        # Continue until finished or max steps reached
         while self._step_count < self.agent_config.max_steps:
-            # 检查时间限制
             if self._exec_context and self._exec_context.is_time_exceeded():
                 elapsed = self._exec_context.get_elapsed_seconds()
                 return f"已达到时间限制 ({elapsed}秒)，任务自动结束"
@@ -263,23 +301,12 @@ class PhoneAgent:
         return "Max steps reached"
 
     def step(self, task: str | None = None) -> StepResult:
-        """
-        Execute a single step of the agent.
-
-        Useful for manual control or debugging.
-
-        Args:
-            task: Task description (only needed for first step).
-
-        Returns:
-            StepResult with step details.
-        """
+        """Execute a single step of the agent."""
         is_first = len(self._context) == 0
 
         if is_first and not task:
             raise ValueError("Task is required for the first step")
 
-        # 初始化执行上下文
         if is_first:
             self._exec_context = ExecutionContext(
                 task=task,
@@ -288,7 +315,6 @@ class PhoneAgent:
                 max_steps=self.agent_config.max_steps,
             )
 
-        # 检查时间限制
         if self._exec_context and self._exec_context.is_time_exceeded():
             elapsed = self._exec_context.get_elapsed_seconds()
             return StepResult(
@@ -314,16 +340,25 @@ class PhoneAgent:
         """Execute a single step of the agent loop."""
         self._step_count += 1
 
-        # 更新执行上下文
         if self._exec_context:
             self._exec_context.step_count = self._step_count
+
+            # 检查是否有强制干预操作
+            if self._exec_context.intervention_action:
+                intervention = self._exec_context.intervention_action
+                self._exec_context.intervention_action = None
+                if self.agent_config.verbose:
+                    print(f"🔄 执行干预操作: {intervention.get('action')}")
+                # 直接执行干预操作
+                device_factory = get_device_factory()
+                screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+                self.action_handler.execute(intervention, screenshot.width, screenshot.height)
+                time.sleep(0.5)
 
         # Capture current screen state
         device_factory = get_device_factory()
         screenshot = device_factory.get_screenshot(self.agent_config.device_id)
         current_app = device_factory.get_current_app(self.agent_config.device_id)
-
-        # 计算当前屏幕哈希
         current_screen_hash = compute_screen_hash(screenshot.base64_data)
 
         # Build messages
@@ -331,33 +366,32 @@ class PhoneAgent:
             self._context.append(
                 MessageBuilder.create_system_message(self.agent_config.system_prompt)
             )
-
             screen_info = MessageBuilder.build_screen_info(current_app)
 
-            # 第一步也包含时间和任务提示（如果有时间限制）
-            context_hint = ""
+            # 第一步的提示
+            task_state = ""
             if self._exec_context and self._exec_context.max_duration_seconds > 0:
-                context_hint = self._exec_context.build_context_hint() + "\n\n"
+                task_state = self._exec_context.build_task_state() + "\n\n"
 
-            text_content = f"{user_prompt}\n\n{context_hint}{screen_info}"
+            text_content = f"{user_prompt}\n\n{task_state}{screen_info}"
 
             self._context.append(
                 MessageBuilder.create_user_message(
                     text=text_content, image_base64=screenshot.base64_data
                 )
             )
-            # 记录初始屏幕哈希
             self._last_screen_hash = current_screen_hash
         else:
             screen_info = MessageBuilder.build_screen_info(current_app)
 
-            # 构建上下文提示（包含任务提醒、进度、时间状态、操作反馈）
-            context_hint = ""
+            # 构建结构化任务状态
+            task_state = ""
             if self._exec_context:
-                context_hint = self._exec_context.build_context_hint()
+                # 先检测循环
+                self._exec_context.detect_loop()
+                task_state = self._exec_context.build_task_state()
 
-            # 在每一步都提醒 AI 当前任务和状态
-            text_content = f"** 执行状态 **\n\n{context_hint}\n\n** Screen Info **\n\n{screen_info}"
+            text_content = f"---\n{task_state}\n---\n{screen_info}"
 
             self._context.append(
                 MessageBuilder.create_user_message(
@@ -365,7 +399,7 @@ class PhoneAgent:
                 )
             )
 
-        # 上下文压缩：保留系统消息 + 最近的消息
+        # 智能上下文压缩
         self._compress_context_if_needed()
 
         # Get model response
@@ -386,27 +420,28 @@ class PhoneAgent:
                 message=f"Model error: {e}",
             )
 
+        # 从思考中提取里程碑
+        if self._exec_context and response.thinking:
+            self._exec_context.extract_milestone_from_thinking(response.thinking)
+
         # Parse action from response
         try:
             action = parse_action(response.action)
         except ValueError as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
-            # Handle empty response specially - allow retry instead of immediate finish
             if not response.action or not response.action.strip():
-                print("⚠️ AI model returned empty response, will retry on next step...")
-                # Return a non-fatal result that allows the loop to continue
+                print("⚠️ AI model returned empty response, will retry...")
                 return StepResult(
                     success=True,
                     finished=False,
                     action=do(action="Wait", duration="1 seconds"),
-                    thinking=response.thinking or "Empty response, waiting to retry...",
+                    thinking=response.thinking or "Empty response, waiting...",
                     message="Waiting for AI response...",
                 )
             action = finish(message=response.action)
 
         if self.agent_config.verbose:
-            # Print thinking process
             print("-" * 50)
             print(f"🎯 {msgs['action']}:")
             print(json.dumps(action, ensure_ascii=False, indent=2))
@@ -427,33 +462,23 @@ class PhoneAgent:
                 finish(message=str(e)), screenshot.width, screenshot.height
             )
 
-        # 执行后检测屏幕变化（关键改进）
-        action_name = action.get("action", "操作")
+        # 记录操作结果用于循环检测
         if action.get("_metadata") != "finish":
-            # 等待短暂时间让屏幕更新
             time.sleep(0.3)
-            # 获取执行后的截图
             screenshot_after = device_factory.get_screenshot(self.agent_config.device_id)
             screen_hash_after = compute_screen_hash(screenshot_after.base64_data)
 
-            # 更新操作反馈
             if self._exec_context:
-                self._exec_context.update_action_feedback(
-                    self._last_screen_hash,
-                    screen_hash_after,
-                    action_name
-                )
-                # 记录步骤历史
-                screen_changed = self._last_screen_hash != screen_hash_after
-                action_desc = self._format_action_desc(action)
-                self._exec_context.record_step(action_desc, screen_changed)
+                self._exec_context.record_action(action, self._last_screen_hash, screen_hash_after)
 
-            # 更新最后的屏幕哈希
             self._last_screen_hash = screen_hash_after
 
+            # 打印操作结果
             if self.agent_config.verbose:
-                if self._exec_context and self._exec_context.last_action_feedback:
-                    print(self._exec_context.last_action_feedback)
+                if self._last_screen_hash != screen_hash_after:
+                    print("✓ 屏幕已更新")
+                else:
+                    print("✗ 屏幕无变化")
 
         # Add assistant response to context
         self._context.append(
@@ -462,15 +487,12 @@ class PhoneAgent:
             )
         )
 
-        # Check if finished
         finished = action.get("_metadata") == "finish" or result.should_finish
 
         if finished and self.agent_config.verbose:
             msgs = get_messages(self.agent_config.lang)
             print("\n" + "🎉 " + "=" * 48)
-            print(
-                f"✅ {msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}"
-            )
+            print(f"✅ {msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}")
             print("=" * 50 + "\n")
 
         return StepResult(
@@ -483,69 +505,36 @@ class PhoneAgent:
 
     @property
     def context(self) -> list[dict[str, Any]]:
-        """Get the current conversation context."""
         return self._context.copy()
 
     @property
     def step_count(self) -> int:
-        """Get the current step count."""
         return self._step_count
 
     def _compress_context_if_needed(self) -> None:
-        """压缩上下文，防止过长"""
-        # 保留: 系统消息(1) + 最近N轮对话
+        """
+        智能上下文压缩
+        保留：系统消息 + 第一条用户消息（含原始任务） + 最近N轮对话
+        """
         if len(self._context) <= self._max_context_messages:
             return
 
-        # 保留系统消息
         system_msg = self._context[0] if self._context else None
+        first_user_msg = self._context[1] if len(self._context) > 1 else None
 
-        # 保留最近的消息（每轮对话=user+assistant）
-        recent_count = self._max_context_messages - 1  # 减去系统消息
-        recent_messages = self._context[-recent_count:]
+        # 保留最近的消息
+        keep_recent = self._max_context_messages - 2  # 减去系统消息和第一条用户消息
+        recent_messages = self._context[-keep_recent:]
 
         # 重建上下文
+        new_context = []
         if system_msg:
-            self._context = [system_msg] + recent_messages
-        else:
-            self._context = recent_messages
+            new_context.append(system_msg)
+        if first_user_msg:
+            new_context.append(first_user_msg)
+        new_context.extend(recent_messages)
+
+        self._context = new_context
 
         if self.agent_config.verbose:
-            print(f"📝 上下文已压缩，保留最近 {len(self._context)} 条消息")
-
-    def _format_action_desc(self, action: dict) -> str:
-        """格式化操作描述"""
-        action_type = action.get("action", "未知")
-        metadata = action.get("_metadata", "")
-
-        if metadata == "finish":
-            return f"完成: {action.get('message', '')[:30]}"
-
-        if action_type == "Tap":
-            element = action.get("element", [])
-            return f"点击 ({element[0] if element else '?'}, {element[1] if len(element) > 1 else '?'})"
-
-        if action_type == "Swipe":
-            start = action.get("start", [])
-            end = action.get("end", [])
-            return f"滑动 {start} → {end}"
-
-        if action_type == "Type":
-            text = action.get("text", "")
-            if len(text) > 20:
-                text = text[:20] + "..."
-            return f"输入 '{text}'"
-
-        if action_type == "Launch":
-            return f"启动 {action.get('app', '')}"
-
-        if action_type == "Back":
-            return "返回"
-
-        if action_type == "Home":
-            return "回到主屏幕"
-
-        if action_type == "Wait":
-            return f"等待 {action.get('duration', '')}"
-
-        return f"{action_type}"
+            print(f"📝 上下文已压缩至 {len(self._context)} 条消息")
