@@ -232,10 +232,18 @@ class TaskPlanner:
         )
 
         try:
+            print(f"[DEBUG] TaskPlanner.plan: calling AI for task='{task}'")
             response = self.api_client(prompt, screenshot_base64)
-            return self._parse_plan_response(response)
+            print(f"[DEBUG] TaskPlanner.plan: AI response length={len(response)}")
+            print(f"[DEBUG] TaskPlanner.plan: AI response preview: {response[:500]}")
+
+            plan = self._parse_plan_response(response)
+            print(f"[DEBUG] TaskPlanner.plan: successfully parsed {len(plan.steps)} steps")
+            return plan
         except Exception as e:
             # 解析失败时返回简单计划
+            print(f"[DEBUG] TaskPlanner.plan: FAILED to parse, error={e}")
+            print(f"[DEBUG] TaskPlanner.plan: falling back to single-step mode")
             return TaskPlan(
                 understanding=task,
                 steps=[TaskStep(
@@ -579,19 +587,24 @@ class StepExecutor:
                 return result
 
             # 4. 决定操作
+            print(f"[DEBUG] StepExecutor: calling _decide_action for step '{step.goal}'")
             action_info = self._decide_action(screenshot, step, context)
             if not action_info:
+                print(f"[DEBUG] StepExecutor: _decide_action returned None, retrying")
                 retry_count += 1
                 continue
 
             action = action_info.get("action", "")
             wait_time = action_info.get("wait_time", 2)
+            print(f"[DEBUG] StepExecutor: decided action='{action}', wait_time={wait_time}")
 
             # 5. 执行操作
+            print(f"[DEBUG] StepExecutor: executing action '{action}'")
             success, message = self.execute_func(action)
             actions_taken.append(action)
             context.total_actions += 1
             context.action_history.append(action)
+            print(f"[DEBUG] StepExecutor: action result - success={success}, message={message}")
 
             if not success:
                 retry_count += 1
@@ -659,12 +672,20 @@ class StepExecutor:
         )
 
         try:
+            print(f"[DEBUG] _decide_action: calling AI API...")
             response = self.api_client(prompt, screenshot)
+            print(f"[DEBUG] _decide_action: AI returned {len(response)} chars")
+            print(f"[DEBUG] _decide_action: response preview: {response[:200]}")
+
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
-                return json.loads(json_match.group(0))
-        except Exception:
-            pass
+                data = json.loads(json_match.group(0))
+                print(f"[DEBUG] _decide_action: parsed JSON successfully, action={data.get('action')}")
+                return data
+            else:
+                print(f"[DEBUG] _decide_action: no JSON found in response")
+        except Exception as e:
+            print(f"[DEBUG] _decide_action: exception - {e}")
 
         return None
 
