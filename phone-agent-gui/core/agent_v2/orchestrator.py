@@ -67,11 +67,15 @@ class StepRunner:
                 resolved_target = None
                 if action.target:
                     resolved_target = self.resolver.resolve(obs, action.target.dict())
-                    resolved = asdict(resolved_target)
-                self.executor.execute(action, resolved_target)
-                next_obs = self.waiter.wait_new(obs)
-                verify = self.verifier.verify(obs, next_obs, step.get("postcheck", []))
-                self.trace_logger.log_step(obs, next_obs, action, resolved, verify)
+                if action.action == "tap" and not self._is_valid_tap_target(resolved_target):
+                else:
+                    try:
+                        self.executor.execute(action, resolved_target)
+                        next_obs = self.waiter.wait_new(obs)
+                        verify = self.verifier.verify(obs, next_obs, step.get("postcheck", []))
+                    except TargetUnresolvedError:
+                        next_obs = self.waiter.wait_new(obs)
+                        verify = self._target_not_found_verify()
                 self.summarizer.maybe_summarize(step_id, next_obs, action, verify)
                 if verify.success:
                     obs = next_obs
@@ -111,4 +115,11 @@ class StepRunner:
                 "android.intent.category.LAUNCHER",
                 "1",
             ])
+    def _is_valid_tap_target(self, resolved_target) -> bool:
+        if not resolved_target:
+            return False
+        if resolved_target.coord:
+            return True
+        return bool(resolved_target.bounds)
+
         return self.waiter.wait_new(obs)
