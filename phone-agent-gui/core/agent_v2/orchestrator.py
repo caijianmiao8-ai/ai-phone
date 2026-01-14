@@ -11,7 +11,7 @@ from .logging.trace_logger import TraceLogger
 from .memory.checkpoint import CheckpointManager
 from .memory.memory_store import MemoryStore
 from .memory.summarizer import Summarizer
-from .observation import ObservationBuilder, ObservationWaiter
+from .observation_builder import ObservationBuilder, ObservationWaiter
 from .providers.screen_provider import ScreenProvider
 from .providers.state_provider import StateProvider
 from .providers.ui_provider import UIProvider

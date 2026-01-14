@@ -4,7 +4,7 @@ from typing import Dict
 
 from ..actions.action_schema import ActionSchema
 from ..actions.action_executor import ActionExecutor
-from ..observation import ObservationBuilder, ObservationWaiter
+from ..observation_builder import ObservationBuilder, ObservationWaiter
 
 
 class CheckpointManager:
