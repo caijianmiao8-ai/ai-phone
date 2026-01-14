@@ -1,0 +1,15 @@
+name: open_settings_display
+app: com.android.settings
+steps:
+  - name: open_settings
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "text=设置 OR text=Settings"}
+    postcheck:
+      - "activity_contains:Settings"
+  - name: open_display
+    action_hint:
+      action: tap
+      target: {strategy: uiauto, query: "contains=Display OR contains=显示"}
+    postcheck:
+      - "ui_contains:text=Display"
