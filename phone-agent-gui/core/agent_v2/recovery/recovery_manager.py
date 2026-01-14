@@ -39,7 +39,7 @@ class FailureClassifier:
             return FailureType.POPUP_BLOCK
         if self._contains_keywords(now, self.state_lost_keywords):
             return FailureType.STATE_LOST
-        if any("ui_contains" in check for check in failed_checks):
+        if any("ui_contains" in check for check in failed_checks) or "target_not_found" in failed_checks:
             return FailureType.TARGET_NOT_FOUND
         return FailureType.TARGET_NOT_FOUND
 

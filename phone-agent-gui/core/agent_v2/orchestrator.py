@@ -68,14 +68,25 @@ class StepRunner:
                 if action.target:
                     resolved_target = self.resolver.resolve(obs, action.target.dict())
                 if action.action == "tap" and not self._is_valid_tap_target(resolved_target):
-                else:
-                    try:
-                        self.executor.execute(action, resolved_target)
-                        next_obs = self.waiter.wait_new(obs)
-                        verify = self.verifier.verify(obs, next_obs, step.get("postcheck", []))
-                    except TargetUnresolvedError:
-                        next_obs = self.waiter.wait_new(obs)
-                        verify = self._target_not_found_verify()
+                    self.trace_logger.log_step(obs, next_obs, action, resolved, verify)
+                    self.summarizer.maybe_summarize(step_id, next_obs, action, verify)
+                    failure = self.classifier.classify(obs, next_obs, verify.failed_checks, expected_package)
+                    results["failures"].append(failure.value)
+                    recovery_plan = self.recovery.recover(failure, next_obs, action)
+                    for recovery_action in recovery_plan.actions:
+                        self.executor.execute(recovery_action, None)
+                        time.sleep(0.5)
+                    retries += 1
+                    results["retries"] += 1
+                    obs = self.waiter.wait_new(next_obs)
+                    continue
+                try:
+                    self.executor.execute(action, resolved_target)
+                    next_obs = self.waiter.wait_new(obs)
+                    verify = self.verifier.verify(obs, next_obs, step.get("postcheck", []))
+                except TargetUnresolvedError:
+                    next_obs = self.waiter.wait_new(obs)
+                    verify = self._target_not_found_verify()
                 self.summarizer.maybe_summarize(step_id, next_obs, action, verify)
                 if verify.success:
                     obs = next_obs
