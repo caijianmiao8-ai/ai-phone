@@ -97,11 +97,11 @@ class RemoteScreenCapture:
 
         # 工作线程
         self._workers: List[threading.Thread] = []
-        self._num_workers = 2  # 双线程并行预取
-        self._semaphore = threading.Semaphore(2)  # 限制并发
+        self._num_workers = 1  # 远程设备用单线程避免并发冲突
+        self._semaphore = threading.Semaphore(1)  # 限制并发
 
         # 配置
-        self._timeout = 5.0  # 远程场景需要更长超时
+        self._timeout = 10.0  # 远程场景需要更长超时（增加到10秒）
         self._error_backoff = 0.5  # 错误后等待时间
         self._max_consecutive_errors = 5
 
