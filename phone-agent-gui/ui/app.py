@@ -848,6 +848,13 @@ Android: {info.get('android_version') or '未知'}"""
     )
 
 
+def auto_select_device() -> Tuple[str, str, str, bool, Optional[Image.Image]]:
+    """自动选择当前设备（用于初始加载）"""
+    if app_state.current_device:
+        return select_device(app_state.current_device)
+    return "请先选择一个设备", "", "", False, None
+
+
 def connect_wifi(ip_address: str):
     """WiFi连接设备"""
     if not ip_address:
@@ -861,6 +868,8 @@ def connect_wifi(ip_address: str):
     success, message = app_state.device_manager.connect_remote(ip, int(port))
 
     if success:
+        # 设置为当前设备，以便自动选择
+        app_state.current_device = ip_address
         app_state.settings.last_wifi_address = ip_address
         save_settings(app_state.settings)
         return f"✅ {message}"
@@ -3360,7 +3369,7 @@ def create_app() -> gr.Blocks:
                 outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
             )
 
-            # WiFi连接 - 连接后自动扫描
+            # WiFi连接 - 连接后自动扫描并选择设备
             connect_btn.click(
                 fn=connect_wifi,
                 inputs=[wifi_ip],
@@ -3375,6 +3384,9 @@ def create_app() -> gr.Blocks:
                     assistant_device_selector,
                     schedule_device_selector,
                 ],
+            ).then(
+                fn=auto_select_device,
+                outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
             )
 
             disconnect_btn.click(
@@ -3674,7 +3686,7 @@ def create_app() -> gr.Blocks:
                 outputs=[scheduler_table],
             )
 
-            # 初始加载设备列表
+            # 初始加载设备列表并自动选择上次使用的设备
             app.load(
                 fn=scan_devices,
                 outputs=[
@@ -3685,6 +3697,9 @@ def create_app() -> gr.Blocks:
                     assistant_device_selector,
                     schedule_device_selector,
                 ],
+            ).then(
+                fn=auto_select_device,
+                outputs=[device_info, device_custom_name, device_notes, device_favorite, preview_image],
             )
 
             # ============ 设置 Tab ============
