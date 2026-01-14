@@ -14,6 +14,73 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 from enum import Enum
 
 
+# ==================== JSON 辅助函数 ====================
+
+def clean_json_string(json_str: str) -> str:
+    """清理 JSON 字符串（移除注释、尾随逗号等）"""
+    # 移除 JavaScript 风格的注释
+    json_str = re.sub(r'//.*$', '', json_str, flags=re.MULTILINE)
+    json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
+    # 移除尾随逗号（在数组或对象最后一个元素后）
+    json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+    return json_str
+
+
+def fix_common_json_issues(json_str: str) -> str:
+    """修复常见的 JSON 问题（单引号、Python 风格的布尔值等）"""
+    # 修复单引号
+    json_str = json_str.replace("'", '"')
+    # 修复 Python 风格的 True/False/None
+    json_str = re.sub(r'\bTrue\b', 'true', json_str)
+    json_str = re.sub(r'\bFalse\b', 'false', json_str)
+    json_str = re.sub(r'\bNone\b', 'null', json_str)
+    # 确保键名有引号（注意：这个正则可能过于激进，但通常有效）
+    json_str = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_str)
+    return json_str
+
+
+def extract_json_from_response(response: str, required_field: Optional[str] = None) -> str:
+    """
+    从 AI 响应中提取 JSON（多策略）
+
+    Args:
+        response: AI 响应文本
+        required_field: 可选的必需字段名（如 "steps"、"action"）
+
+    Returns:
+        提取的 JSON 字符串
+
+    Raises:
+        ValueError: 如果无法提取 JSON
+    """
+    # 策略1: 提取 ```json...``` 代码块
+    json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+    if json_match:
+        return json_match.group(1)
+
+    # 策略2: 提取任何 {...} 结构
+    json_match = re.search(r'\{[\s\S]*\}', response)
+    if json_match:
+        json_str = json_match.group(0)
+        # 如果指定了必需字段，验证是否包含
+        if required_field and f'"{required_field}"' in json_str:
+            return json_str
+        elif not required_field:
+            return json_str
+
+    # 策略3: 如果指定了必需字段，尝试查找包含该字段的 JSON 片段
+    if required_field:
+        field_match = re.search(
+            rf'\{{[^}}]*"{required_field}"\s*:[\s\S]*?\}}',
+            response,
+            re.DOTALL
+        )
+        if field_match:
+            return field_match.group(0)
+
+    raise ValueError("无法从响应中提取 JSON")
+
+
 # ==================== 数据结构定义 ====================
 
 class StepStatus(Enum):
@@ -280,25 +347,11 @@ class TaskPlanner:
 
     def _parse_plan_response(self, response: str) -> TaskPlan:
         """解析 AI 返回的计划（增强容错）"""
-        # 策略1: 尝试提取 ```json...``` 代码块
-        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            # 策略2: 尝试提取任何 {...} 结构
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                # 策略3: 尝试查找包含 steps 的 JSON 片段
-                steps_match = re.search(r'\{[^}]*"steps"\s*:\s*\[[\s\S]*?\]\s*[^}]*\}', response, re.DOTALL)
-                if steps_match:
-                    json_str = steps_match.group(0)
-                else:
-                    raise ValueError("无法从响应中提取 JSON")
+        # 提取 JSON（优先查找包含 "steps" 字段的）
+        json_str = extract_json_from_response(response, required_field="steps")
 
-        # 清理 JSON 字符串（移除注释、尾随逗号等）
-        json_str = self._clean_json_string(json_str)
+        # 清理 JSON 字符串
+        json_str = clean_json_string(json_str)
 
         try:
             data = json.loads(json_str)
@@ -306,7 +359,7 @@ class TaskPlanner:
             print(f"[DEBUG] _parse_plan_response: JSON decode error - {e}")
             print(f"[DEBUG] _parse_plan_response: attempted to parse: {json_str[:200]}")
             # 尝试修复常见问题
-            json_str = self._fix_common_json_issues(json_str)
+            json_str = fix_common_json_issues(json_str)
             data = json.loads(json_str)  # 再次尝试
 
         steps = []
@@ -327,27 +380,6 @@ class TaskPlanner:
             estimated_actions=data.get("estimated_actions", len(steps) * 3),
             warnings=data.get("warnings", [])
         )
-
-    def _clean_json_string(self, json_str: str) -> str:
-        """清理 JSON 字符串"""
-        # 移除 JavaScript 风格的注释
-        json_str = re.sub(r'//.*$', '', json_str, flags=re.MULTILINE)
-        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
-        # 移除尾随逗号（在数组或对象最后一个元素后）
-        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-        return json_str
-
-    def _fix_common_json_issues(self, json_str: str) -> str:
-        """修复常见的 JSON 问题"""
-        # 修复单引号
-        json_str = json_str.replace("'", '"')
-        # 修复 Python 风格的 True/False/None
-        json_str = re.sub(r'\bTrue\b', 'true', json_str)
-        json_str = re.sub(r'\bFalse\b', 'false', json_str)
-        json_str = re.sub(r'\bNone\b', 'null', json_str)
-        # 确保键名有引号
-        json_str = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_str)
-        return json_str
 
 
 # ==================== 异常处理器 ====================
@@ -528,18 +560,26 @@ class StepExecutor:
 ## 完成标志
 {success_check}
 
+## ⚠️ 重要：必须严格按照 JSON 格式回复，不要添加任何额外的解释或文字！
+
 ## 请决定下一步操作
 根据屏幕内容，执行什么操作可以达成当前步骤目标？
 
-用 JSON 格式回复：
+## 输出格式示例
 ```json
 {{
     "thinking": "分析当前屏幕，说明为什么要这样操作",
     "action": "具体操作，如：点击搜索框、上滑、输入xxx、打开xxx",
-    "wait_time": 操作后等待秒数（1-5）,
-    "confidence": 0-100 的置信度
+    "wait_time": 2,
+    "confidence": 85
 }}
 ```
+
+注意：
+- action 字段必须是明确的操作指令，如"点击快手图标"、"向上滑动"、"输入文本xxx"
+- wait_time 必须是数字（1-5之间）
+- confidence 必须是数字（0-100之间）
+- 只返回 JSON，不要添加额外的说明文字
 """
 
     VERIFY_PROMPT = """## 刚才的操作
@@ -548,22 +588,29 @@ class StepExecutor:
 ## 预期结果
 {expected}
 
+## ⚠️ 重要：必须严格按照 JSON 格式回复，不要添加额外的解释文字！
+
 ## 请判断
 观察当前屏幕，回答：
 1. 预期结果是否已经出现？
 2. 是否需要继续操作才能达成目标？
 3. 是否走错了路径（进入了不相关的页面）？
 
-用 JSON 格式回复：
+## 输出格式示例
 ```json
 {{
-    "success": true/false,
-    "need_more_action": true/false,
-    "wrong_path": true/false,
-    "confidence": 0-100,
-    "reason": "判断依据"
+    "success": true,
+    "need_more_action": false,
+    "wrong_path": false,
+    "confidence": 90,
+    "reason": "屏幕显示快手主界面，视频正在播放"
 }}
 ```
+
+注意：
+- success、need_more_action、wrong_path 必须是布尔值（true 或 false）
+- confidence 必须是数字（0-100之间）
+- 只返回 JSON，不要添加额外的说明文字
 """
 
     def __init__(self, api_client: Callable[[str, Optional[str]], str],
@@ -723,7 +770,7 @@ class StepExecutor:
 
     def _decide_action(self, screenshot: str, step: TaskStep,
                        context: ExecutionContext) -> Optional[Dict]:
-        """决定下一步操作"""
+        """决定下一步操作（增强 JSON 解析）"""
         prompt = self.ACTION_PROMPT.format(
             context=context.get_context_for_ai(),
             goal=step.goal,
@@ -736,21 +783,30 @@ class StepExecutor:
             print(f"[DEBUG] _decide_action: AI returned {len(response)} chars")
             print(f"[DEBUG] _decide_action: response preview: {response[:200]}")
 
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                data = json.loads(json_match.group(0))
-                print(f"[DEBUG] _decide_action: parsed JSON successfully, action={data.get('action')}")
-                return data
-            else:
-                print(f"[DEBUG] _decide_action: no JSON found in response")
-        except Exception as e:
-            print(f"[DEBUG] _decide_action: exception - {e}")
+            # 提取 JSON（优先查找包含 "action" 字段的）
+            json_str = extract_json_from_response(response, required_field="action")
 
-        return None
+            # 清理 JSON 字符串
+            json_str = clean_json_string(json_str)
+
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] _decide_action: JSON decode error - {e}")
+                # 尝试修复常见问题
+                json_str = fix_common_json_issues(json_str)
+                data = json.loads(json_str)
+
+            print(f"[DEBUG] _decide_action: parsed JSON successfully, action={data.get('action')}")
+            return data
+
+        except Exception as e:
+            print(f"[DEBUG] _decide_action: failed to parse response - {e}")
+            return None
 
     def _verify_completion(self, screenshot: str, step: TaskStep,
                           last_action: str) -> VerificationResult:
-        """验证步骤是否完成"""
+        """验证步骤是否完成（增强 JSON 解析）"""
         prompt = self.VERIFY_PROMPT.format(
             action=last_action,
             expected=step.success_check
@@ -758,25 +814,34 @@ class StepExecutor:
 
         try:
             response = self.api_client(prompt, screenshot)
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                data = json.loads(json_match.group(0))
-                # 安全解析 confidence
-                confidence_raw = data.get("confidence", 0)
-                try:
-                    confidence = float(confidence_raw) / 100
-                except (TypeError, ValueError):
-                    confidence = 0.0
-                return VerificationResult(
-                    success=bool(data.get("success", False)),
-                    wrong_path=bool(data.get("wrong_path", False)),
-                    confidence=confidence,
-                    reason=str(data.get("reason", ""))
-                )
-        except Exception:
-            pass
 
-        return VerificationResult(success=False, reason="验证失败")
+            # 提取 JSON（优先查找包含 "success" 字段的）
+            json_str = extract_json_from_response(response, required_field="success")
+            json_str = clean_json_string(json_str)
+
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # 尝试修复常见问题
+                json_str = fix_common_json_issues(json_str)
+                data = json.loads(json_str)
+
+            # 安全解析 confidence
+            confidence_raw = data.get("confidence", 0)
+            try:
+                confidence = float(confidence_raw) / 100
+            except (TypeError, ValueError):
+                confidence = 0.0
+
+            return VerificationResult(
+                success=bool(data.get("success", False)),
+                wrong_path=bool(data.get("wrong_path", False)),
+                confidence=confidence,
+                reason=str(data.get("reason", ""))
+            )
+        except Exception as e:
+            print(f"[DEBUG] _verify_completion: failed to parse response - {e}")
+            return VerificationResult(success=False, reason="验证失败")
 
     def _prepare_retry(self, step: TaskStep, retry_num: int, reason: str):
         """准备重试"""
