@@ -33,7 +33,25 @@ class ScreenProvider:
             timeout=10,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to capture screen: {result.stderr.decode('utf-8', 'ignore')}")
+            devices = self._adb_devices(adb_path)
+            raise RuntimeError(
+                "Failed to capture screen: "
+                f"{result.stderr.decode('utf-8', 'ignore')} devices={devices}"
+            )
+        if not result.stdout:
+            devices = self._adb_devices(adb_path)
+            raise RuntimeError(f"Empty screen capture output devices={devices}")
         image = Image.open(io.BytesIO(result.stdout))
         image.load()
         return self._frame_id, frame_ts, image
+
+    def _adb_devices(self, adb_path: str) -> str:
+        result = subprocess.run(
+            [adb_path, "devices"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return result.stderr.strip()

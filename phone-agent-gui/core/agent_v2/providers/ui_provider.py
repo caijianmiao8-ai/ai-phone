@@ -16,7 +16,13 @@ class UIProvider:
         adb_path = self.adb_helper.get_adb_path()
         if not adb_path:
             raise RuntimeError("ADB not available for UI dump")
-        subprocess.run([adb_path, "shell", "uiautomator", "dump", "/sdcard/uidump.xml"], timeout=10)
+        dump_result = subprocess.run(
+            [adb_path, "shell", "uiautomator", "dump", "/sdcard/uidump.xml"],
+            capture_output=True,
+            timeout=10,
+        )
+        if dump_result.returncode != 0:
+            raise RuntimeError(f"uiautomator dump failed: {dump_result.stderr.decode('utf-8', 'ignore')}")
         result = subprocess.run(
             [adb_path, "exec-out", "cat", "/sdcard/uidump.xml"],
             capture_output=True,
@@ -25,8 +31,12 @@ class UIProvider:
         if result.returncode != 0:
             raise RuntimeError("Failed to read ui dump")
         xml_text = result.stdout.decode("utf-8", "replace")
+        if not xml_text.strip():
+            raise RuntimeError("UI dump XML empty")
         xml_path = output_dir / f"ui_{frame_id}.xml"
         xml_path.write_text(xml_text, encoding="utf-8")
+        if not xml_path.exists() or xml_path.stat().st_size == 0:
+            raise RuntimeError("UI dump XML file missing or empty")
         nodes = self._parse_nodes(xml_text)
         return xml_path, nodes
 

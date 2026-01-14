@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -29,10 +30,22 @@ class ObservationBuilder:
 
     def build(self) -> Observation:
         frame_id, frame_ts, image = self.screen_provider.get_frame()
+        if image is None:
+            raise RuntimeError("ScreenProvider returned no image")
         screenshot_path = self._save_screenshot(frame_id, image)
         screen_hash = self._compute_hash(image)
         state = self.state_provider.get_state()
         ui_xml_path, ui_nodes = self.ui_provider.dump_ui(self.output_dir, frame_id)
+        logging.info(
+            "Observation built frame=%s screenshot=%s hash=%s xml=%s ui_nodes=%s package=%s activity=%s",
+            frame_id,
+            screenshot_path,
+            screen_hash,
+            ui_xml_path,
+            len(ui_nodes),
+            state.get("package", ""),
+            state.get("activity", ""),
+        )
         return Observation(
             frame_id=frame_id,
             frame_ts=frame_ts,

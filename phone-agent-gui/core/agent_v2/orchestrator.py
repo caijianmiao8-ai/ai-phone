@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -5,8 +6,20 @@ from typing import Any, Dict, List
 
 import yaml
 
-from .actions.action_executor import ActionExecutor
-from .actions.action_schema import ActionSchema
+        try:
+            obs = self.waiter.wait_new(None)
+        except Exception as exc:
+            return self._handle_observation_failure(exc, "initial_observation")
+        if obs is None:
+            return self._handle_observation_failure(RuntimeError("Observation is None"), "initial_observation")
+        try:
+            obs = self._ensure_app(expected_package, obs)
+        except Exception as exc:
+            return self._handle_observation_failure(exc, "ensure_app")
+        if obs is None:
+            return self._handle_observation_failure(RuntimeError("Observation is None"), "ensure_app")
+                if obs is None:
+                    return self._handle_observation_failure(RuntimeError("Observation is None"), "step_observation")
 from .logging.trace_logger import TraceLogger
 from .memory.checkpoint import CheckpointManager
 from .memory.memory_store import MemoryStore
@@ -134,3 +147,13 @@ class StepRunner:
         return bool(resolved_target.bounds)
 
         return self.waiter.wait_new(obs)
+
+    def _handle_observation_failure(self, error: Exception, stage: str) -> Dict[str, Any]:
+        error_payload = {
+            "error": "OBSERVATION_BUILD_FAILED",
+            "stage": stage,
+            "detail": str(error),
+        }
+        error_path = self.trace_logger.task_dir / "observation_error.json"
+        error_path.write_text(json.dumps(error_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return error_payload
