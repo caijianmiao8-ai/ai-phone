@@ -177,32 +177,55 @@ class TaskPlanner:
 ## 参考知识
 {knowledge}
 
-## 输出要求
-请用 JSON 格式输出任务计划，格式如下：
+## ⚠️ 重要：必须严格按照JSON格式回复，不要添加任何额外的解释或文字！
+
+## 输出格式示例
 ```json
 {{
-    "understanding": "用一句话概括用户想要完成什么",
+    "understanding": "在快手刷视频并点赞评论",
     "steps": [
         {{
             "id": 1,
-            "goal": "这一步要达成的目标（简洁明确）",
-            "success_check": "如何判断这一步成功（具体可观察的界面特征）",
-            "fallback": "如果主要方法失败，备选方案是什么",
+            "goal": "打开快手应用",
+            "success_check": "看到快手主界面，有视频流",
+            "fallback": "如果找不到快手图标，尝试搜索",
             "is_critical": true
+        }},
+        {{
+            "id": 2,
+            "goal": "刷10个视频（上滑切换）",
+            "success_check": "已经滑动10次，看过10个不同的视频",
+            "fallback": "如果卡顿，重启应用",
+            "is_critical": true
+        }},
+        {{
+            "id": 3,
+            "goal": "点赞5个视频",
+            "success_check": "点赞图标变红，计数器显示已点赞5次",
+            "fallback": "如果无法点赞，跳过该视频继续",
+            "is_critical": false
+        }},
+        {{
+            "id": 4,
+            "goal": "评论3个视频",
+            "success_check": "成功发送3条评论",
+            "fallback": "如果评论失败，尝试简单文字",
+            "is_critical": false
         }}
     ],
-    "estimated_actions": 预估总操作次数,
-    "warnings": ["可能遇到的问题1", "可能遇到的问题2"]
+    "estimated_actions": 20,
+    "warnings": ["可能需要登录", "部分视频可能无法评论"]
 }}
 ```
 
-## 注意事项
+## 规划要求
 1. 步骤要具体、可执行，每个步骤对应一个明确的界面状态变化
-2. success_check 要是具体可观察的界面特征（如"看到搜索结果列表"、"出现购物车图标"）
-3. 考虑可能出现的弹窗、广告、登录等情况，在 warnings 中说明
-4. is_critical=true 表示该步骤失败应终止任务，false 表示可以跳过
-5. 步骤数量要合理，不要过于细碎，也不要太粗略
-"""
+2. success_check 要是具体可观察的界面特征
+3. 考虑可能出现的弹窗、广告、登录等情况
+4. is_critical=true 表示该步骤失败应终止任务
+5. 步骤数量要合理（3-8步为宜）
+
+现在请为上述任务生成JSON格式的计划："""
 
     def __init__(self, api_client: Callable[[str, Optional[str]], str]):
         """
