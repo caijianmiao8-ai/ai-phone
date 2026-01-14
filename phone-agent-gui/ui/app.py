@@ -1870,57 +1870,164 @@ def execute_task_for_device(
     app_state.set_device_agent(device_id, agent)
     app_state.set_device_status(device_id, "🚀 执行中")
 
-    task_gen = agent.run_task(task)
     task_result: Optional[TaskResult] = None
     steps_executed = 0
     task_success = False
     error_message = None
 
-    try:
-        while True:
-            step_result = next(task_gen)
-            steps_executed += 1
-            if step_result.screenshot:
-                app_state.set_device_screenshot(device_id, step_result.screenshot)
-            status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
-            app_state.set_device_status(device_id, status_text)
-    except StopIteration as stop:
-        task_result = stop.value
-        if task_result and not task_result.success:
-            app_state.set_device_status(device_id, f"❌ {task_result.message}")
+    # 根据设置选择执行模式
+    if settings.use_smart_executor:
+        # 智能执行器模式
+        app_state.add_device_log(device_id, "🧠 使用智能执行器模式")
+        try:
+            for progress in agent.run_task_smart(task, effective_max_steps, timeout=600):
+                phase = progress.get("phase", "")
+
+                if phase == "planning":
+                    app_state.set_device_status(device_id, "🔍 任务规划中...")
+                    app_state.add_device_log(device_id, progress.get("message", "规划中"))
+
+                elif phase == "planned":
+                    total_steps = progress.get("total_steps", 0)
+                    understanding = progress.get("understanding", "")
+                    app_state.add_device_log(device_id, f"📋 任务理解: {understanding}")
+                    app_state.add_device_log(device_id, f"📋 计划步骤数: {total_steps}")
+                    steps = progress.get("steps", [])
+                    for i, s in enumerate(steps[:5]):  # 只显示前5步
+                        app_state.add_device_log(device_id, f"   {i+1}. {s.get('goal', '')}")
+                    if len(steps) > 5:
+                        app_state.add_device_log(device_id, f"   ... 还有 {len(steps)-5} 步")
+
+                elif phase == "executing":
+                    step_num = progress.get("step", 0)
+                    total = progress.get("total", 0)
+                    goal = progress.get("goal", "")
+                    app_state.set_device_status(device_id, f"🚀 执行中 ({step_num}/{total})")
+                    app_state.add_device_log(device_id, f"▶ 步骤 {step_num}/{total}: {goal}")
+
+                elif phase == "step_completed":
+                    step_num = progress.get("step", 0)
+                    goal = progress.get("goal", "")
+                    actions = progress.get("actions", [])
+                    app_state.add_device_log(device_id, f"✅ 步骤 {step_num} 完成: {goal}")
+                    if actions:
+                        app_state.add_device_log(device_id, f"   动作: {', '.join(actions[:3])}")
+                    steps_executed = step_num
+
+                elif phase == "step_failed":
+                    step_num = progress.get("step", 0)
+                    goal = progress.get("goal", "")
+                    reason = progress.get("reason", "")
+                    is_critical = progress.get("critical", False)
+                    app_state.add_device_log(device_id, f"❌ 步骤 {step_num} 失败: {goal}")
+                    app_state.add_device_log(device_id, f"   原因: {reason}")
+                    if is_critical:
+                        app_state.add_device_log(device_id, "   ⚠️ 关键步骤失败，任务终止")
+
+                elif phase == "step_skipped":
+                    step_num = progress.get("step", 0)
+                    goal = progress.get("goal", "")
+                    reason = progress.get("reason", "")
+                    app_state.add_device_log(device_id, f"⏭ 步骤 {step_num} 跳过: {goal}")
+                    app_state.add_device_log(device_id, f"   原因: {reason}")
+
+                elif phase in ("completed", "stopped", "timeout", "error"):
+                    task_success = progress.get("success", False)
+                    message = progress.get("message", "")
+                    steps_completed = progress.get("steps_completed", 0)
+                    steps_failed = progress.get("steps_failed", 0)
+                    total_time = progress.get("total_time", 0)
+
+                    if task_success:
+                        app_state.set_device_status(device_id, "✅ 任务完成")
+                        app_state.add_device_log(device_id, f"✅ 任务完成: {message}")
+                    else:
+                        error_message = message
+                        if phase == "stopped":
+                            app_state.set_device_status(device_id, "⏹ 任务已停止")
+                        elif phase == "timeout":
+                            app_state.set_device_status(device_id, "⏱ 任务超时")
+                        else:
+                            app_state.set_device_status(device_id, f"❌ {message}")
+                        app_state.add_device_log(device_id, f"❌ 任务失败: {message}")
+
+                    app_state.add_device_log(device_id, f"📊 统计: 完成 {steps_completed} 步, 失败 {steps_failed} 步, 用时 {total_time:.1f}秒")
+                    steps_executed = steps_completed
+
+                    # 记录到历史
+                    app_state.task_history.finish_record(
+                        record_id=record.id,
+                        success=task_success,
+                        message=message,
+                        steps=steps_executed,
+                        error=error_message,
+                    )
+                    break
+
+        except Exception as e:
+            error_message = str(e)
+            app_state.add_device_log(device_id, f"任务执行错误: {error_message}")
+            app_state.set_device_status(device_id, f"❌ {e}")
             app_state.task_history.finish_record(
                 record_id=record.id,
                 success=False,
-                message=task_result.message,
-                steps=task_result.steps_executed,
-                error=task_result.message,
+                message=error_message,
+                steps=steps_executed,
+                error=error_message,
             )
             task_success = False
-            error_message = task_result.message
-        else:
-            app_state.set_device_status(device_id, "✅ 任务完成")
+        finally:
+            app_state.set_device_agent(device_id, None)
+
+    else:
+        # 传统执行模式
+        task_gen = agent.run_task(task)
+
+        try:
+            while True:
+                step_result = next(task_gen)
+                steps_executed += 1
+                if step_result.screenshot:
+                    app_state.set_device_screenshot(device_id, step_result.screenshot)
+                status_text = "✅ 任务完成" if step_result.finished else "🚀 执行中"
+                app_state.set_device_status(device_id, status_text)
+        except StopIteration as stop:
+            task_result = stop.value
+            if task_result and not task_result.success:
+                app_state.set_device_status(device_id, f"❌ {task_result.message}")
+                app_state.task_history.finish_record(
+                    record_id=record.id,
+                    success=False,
+                    message=task_result.message,
+                    steps=task_result.steps_executed,
+                    error=task_result.message,
+                )
+                task_success = False
+                error_message = task_result.message
+            else:
+                app_state.set_device_status(device_id, "✅ 任务完成")
+                app_state.task_history.finish_record(
+                    record_id=record.id,
+                    success=True,
+                    message="任务完成",
+                    steps=task_result.steps_executed if task_result else steps_executed,
+                )
+                task_success = True
+        except Exception as e:
+            error_msg = str(e)
+            app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
+            app_state.set_device_status(device_id, f"❌ {e}")
             app_state.task_history.finish_record(
                 record_id=record.id,
-                success=True,
-                message="任务完成",
-                steps=task_result.steps_executed if task_result else steps_executed,
+                success=False,
+                message=error_msg,
+                steps=steps_executed,
+                error=error_msg,
             )
-            task_success = True
-    except Exception as e:
-        error_msg = str(e)
-        app_state.add_device_log(device_id, f"任务执行错误: {error_msg}")
-        app_state.set_device_status(device_id, f"❌ {e}")
-        app_state.task_history.finish_record(
-            record_id=record.id,
-            success=False,
-            message=error_msg,
-            steps=steps_executed,
-            error=error_msg,
-        )
-        task_success = False
-        error_message = error_msg
-    finally:
-        app_state.set_device_agent(device_id, None)
+            task_success = False
+            error_message = error_msg
+        finally:
+            app_state.set_device_agent(device_id, None)
 
     # 任务完成后执行AI分析（如果启用）
     if getattr(settings, 'enable_task_analysis', True):
@@ -2728,6 +2835,7 @@ def save_settings_form(
     action_delay: float,
     language: str,
     verbose: bool,
+    use_smart_executor: bool,
     assistant_api_base: str,
     assistant_api_key: str,
     assistant_model: str,
@@ -2743,6 +2851,7 @@ def save_settings_form(
     app_state.settings.action_delay = action_delay
     app_state.settings.language = language
     app_state.settings.verbose = verbose
+    app_state.settings.use_smart_executor = use_smart_executor
     app_state.settings.assistant_api_base = assistant_api_base
     app_state.settings.assistant_api_key = assistant_api_key
     app_state.settings.assistant_model = assistant_model
@@ -3650,6 +3759,13 @@ def create_app() -> gr.Blocks:
                         )
                         verbose = gr.Checkbox(label="详细日志", value=True)
 
+                        gr.Markdown("### 智能执行")
+                        use_smart_executor = gr.Checkbox(
+                            label="🧠 启用智能执行器",
+                            value=False,
+                            info="任务分解 + 步骤验证 + 异常处理（实验性功能）"
+                        )
+
                         gr.Markdown("### ADB状态")
                         adb_status = gr.Textbox(label="ADB状态", interactive=False)
                         check_adb_btn = gr.Button("检查ADB")
@@ -3674,7 +3790,7 @@ def create_app() -> gr.Blocks:
                     inputs=[
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
-                        max_steps, action_delay, language, verbose,
+                        max_steps, action_delay, language, verbose, use_smart_executor,
                         assistant_api_base, assistant_api_key, assistant_model, assistant_require_confirmation,
                     ],
                     outputs=[settings_status],
@@ -3693,6 +3809,7 @@ def create_app() -> gr.Blocks:
                         s.action_delay,
                         s.language,
                         s.verbose,
+                        s.use_smart_executor,
                         s.assistant_api_base,
                         s.assistant_api_key,
                         s.assistant_model,
@@ -3704,7 +3821,7 @@ def create_app() -> gr.Blocks:
                     outputs=[
                         api_base_url, api_key, model_name,
                         max_tokens, temperature,
-                        max_steps, action_delay, language, verbose,
+                        max_steps, action_delay, language, verbose, use_smart_executor,
                         assistant_api_base, assistant_api_key, assistant_model, assistant_require_confirmation,
                     ],
                 )
