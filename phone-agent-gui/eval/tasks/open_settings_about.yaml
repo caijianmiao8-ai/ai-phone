@@ -1,12 +1,6 @@
 name: open_settings_about
 app: com.android.settings
 steps:
-  - name: open_settings
-    action_hint:
-      action: tap
-      target: {strategy: uiauto, query: "text=设置 OR text=Settings"}
-    postcheck:
-      - "activity_contains:Settings"
   - name: open_about
     action_hint:
       action: tap

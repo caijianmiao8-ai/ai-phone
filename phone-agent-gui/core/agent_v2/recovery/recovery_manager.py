@@ -24,16 +24,24 @@ class FailureClassifier:
     popup_keywords = ["允许", "Allow", "以后再说", "稍后", "更新", "Skip", "X", "同意", "Agree", "关闭", "Later"]
     state_lost_keywords = ["登录", "Sign in", "网络错误", "重新连接"]
 
-    def classify(self, prev: Observation, now: Observation, failed_checks: List[str]) -> FailureType:
+    def classify(
+        self,
+        prev: Observation,
+        now: Observation,
+        failed_checks: List[str],
+        expected_package: str | None = None,
+    ) -> FailureType:
         if prev.screen_hash == now.screen_hash and prev.activity == now.activity:
             return FailureType.NO_CHANGE
+        if expected_package and now.package and now.package != expected_package:
+            return FailureType.WRONG_PAGE
         if self._contains_keywords(now, self.popup_keywords):
             return FailureType.POPUP_BLOCK
         if self._contains_keywords(now, self.state_lost_keywords):
             return FailureType.STATE_LOST
         if any("ui_contains" in check for check in failed_checks):
             return FailureType.TARGET_NOT_FOUND
-        return FailureType.WRONG_PAGE
+        return FailureType.TARGET_NOT_FOUND
 
     def _contains_keywords(self, observation: Observation, keywords: List[str]) -> bool:
         for node in observation.ui_nodes:

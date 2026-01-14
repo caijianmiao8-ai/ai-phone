@@ -45,13 +45,18 @@ class StepRunner:
     def run_task(self, task_path: Path, max_retries: int = 3) -> Dict[str, Any]:
         task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
         steps = task.get("steps", [])
+        expected_package = task.get("app", "")
         obs = self.waiter.wait_new(None)
+        obs = self._ensure_app(expected_package, obs)
         results = {
             "task": task.get("name", task_path.stem),
             "success": True,
             "steps": [],
             "retries": 0,
             "failures": [],
+            "expected_package": expected_package,
+            "current_package": obs.package,
+            "current_activity": obs.activity,
         }
         for step_id, step in enumerate(steps, start=1):
             retries = 0
@@ -70,9 +75,11 @@ class StepRunner:
                 self.summarizer.maybe_summarize(step_id, next_obs, action, verify)
                 if verify.success:
                     obs = next_obs
+                    results["current_package"] = obs.package
+                    results["current_activity"] = obs.activity
                     results["steps"].append({"step": step.get("name"), "success": True})
                     break
-                failure = self.classifier.classify(obs, next_obs, verify.failed_checks)
+                failure = self.classifier.classify(obs, next_obs, verify.failed_checks, expected_package)
                 results["failures"].append(failure.value)
                 recovery_plan = self.recovery.recover(failure, next_obs, action)
                 for recovery_action in recovery_plan.actions:
@@ -86,3 +93,22 @@ class StepRunner:
                 results["steps"].append({"step": step.get("name"), "success": False})
                 break
         return results
+
+    def _ensure_app(self, expected_package: str, obs) -> Any:
+        if not expected_package:
+            return obs
+        if expected_package == obs.package:
+            return obs
+        if expected_package == "com.android.settings":
+            self.executor._adb_run(["shell", "am", "start", "-a", "android.settings.SETTINGS"])
+        else:
+            self.executor._adb_run([
+                "shell",
+                "monkey",
+                "-p",
+                expected_package,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            ])
+        return self.waiter.wait_new(obs)
