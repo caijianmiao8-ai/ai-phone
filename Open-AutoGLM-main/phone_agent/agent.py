@@ -29,6 +29,7 @@ class AgentConfig:
     system_prompt: str | None = None
     verbose: bool = True
     max_duration_seconds: int = 0  # 时间限制（秒），0表示不限制
+    knowledge_hints: List[str] = field(default_factory=list)  # 知识库操作提示
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -72,6 +73,9 @@ class ExecutionContext:
     # 结构化任务状态
     milestones: List[str] = field(default_factory=list)  # 已完成的里程碑
     current_stage: str = ""  # 当前阶段描述
+
+    # 知识库提示（压缩后的关键规则）
+    knowledge_hints: List[str] = field(default_factory=list)
 
     # 循环检测状态
     loop_warning: str = ""  # 循环警告信息
@@ -177,6 +181,70 @@ class ExecutionContext:
         """设置当前阶段"""
         self.current_stage = stage
 
+    def set_knowledge_hints(self, hints: List[str]) -> None:
+        """设置知识库操作提示"""
+        self.knowledge_hints = hints
+
+    def extract_knowledge_hints(self, knowledge_content: str) -> List[str]:
+        """
+        从知识库内容中提取关键操作提示
+
+        将长文本知识转换为简洁的操作规则，例如：
+        输入: "抖音使用操作指南：\n1. 上滑切换下一个视频\n2. 双击屏幕点赞..."
+        输出: ["上滑→下一个视频", "双击→点赞", "点击评论图标→发评论"]
+        """
+        import re
+        hints = []
+
+        # 策略1: 提取 "操作 → 效果" 模式
+        # 匹配 "点击xxx" "上滑" "双击" 等动作词
+        action_patterns = [
+            # "上滑/下滑/左滑/右滑 + 效果"
+            (r'(上滑|下滑|左滑|右滑)[^\n。，]*?(切换|下一个|上一个|返回|刷新|查看)', r'\1→\2'),
+            # "双击/单击/点击 + 目标 + 效果"
+            (r'(双击|单击|点击)[屏幕]*(.*?)(点赞|评论|分享|收藏|关注)', r'\1\2→\3'),
+            # "长按 + 效果"
+            (r'(长按)[^\n。，]*?(收藏|删除|复制|转发|更多)', r'\1→\2'),
+        ]
+
+        for pattern, replacement in action_patterns:
+            matches = re.findall(pattern, knowledge_content)
+            for match in matches:
+                if isinstance(match, tuple):
+                    hint = ''.join(match)
+                else:
+                    hint = match
+                # 清理并添加
+                hint = hint.strip()
+                if hint and len(hint) <= 15 and hint not in hints:
+                    hints.append(hint)
+
+        # 策略2: 提取带数字序号的步骤关键词
+        # 匹配 "1. xxx" "2. xxx" 格式
+        step_matches = re.findall(r'\d+\.\s*([^\n]{2,20})', knowledge_content)
+        for step in step_matches[:5]:  # 最多5个步骤
+            # 提取动词短语
+            step = step.strip()
+            # 简化：取前10个字符
+            if len(step) > 10:
+                step = step[:10] + "..."
+            if step not in hints:
+                hints.append(step)
+
+        # 策略3: 提取关键操作词
+        keywords = ['搜索', '点击', '输入', '滑动', '返回', '确认', '提交', '选择']
+        for keyword in keywords:
+            if keyword in knowledge_content:
+                # 找到包含关键词的短句
+                match = re.search(rf'{keyword}[^\n。，]{{0,10}}', knowledge_content)
+                if match:
+                    hint = match.group().strip()
+                    if hint and hint not in hints:
+                        hints.append(hint)
+
+        # 限制数量，避免过长
+        return hints[:6]
+
     def build_task_state(self) -> str:
         """
         构建结构化任务状态，注入到每一步
@@ -221,7 +289,11 @@ class ExecutionContext:
                 recent_desc.append(f"{status}{r.action_type}")
             lines.append(f"【最近操作】{' → '.join(recent_desc)}")
 
-        # 7. 循环警告（如果有）
+        # 7. 知识库操作提示（压缩后的关键规则）
+        if self.knowledge_hints:
+            lines.append("【操作提示】" + " | ".join(self.knowledge_hints))
+
+        # 8. 循环警告（如果有）
         if self.loop_warning:
             lines.append(self.loop_warning)
 
@@ -281,6 +353,7 @@ class PhoneAgent:
             start_time=time.time(),
             max_duration_seconds=self.agent_config.max_duration_seconds,
             max_steps=self.agent_config.max_steps,
+            knowledge_hints=self.agent_config.knowledge_hints.copy(),
         )
 
         result = self._execute_step(task, is_first=True)
@@ -333,6 +406,35 @@ class PhoneAgent:
         self._step_count = 0
         self._exec_context = None
         self._last_screen_hash = ""
+
+    def set_knowledge(self, knowledge_content: str) -> List[str]:
+        """
+        从知识库内容中提取关键操作提示并设置
+
+        Args:
+            knowledge_content: 知识库原始内容
+
+        Returns:
+            提取出的操作提示列表
+        """
+        # 创建临时 context 来提取提示
+        temp_ctx = ExecutionContext()
+        hints = temp_ctx.extract_knowledge_hints(knowledge_content)
+
+        # 设置到配置中
+        self.agent_config.knowledge_hints = hints
+
+        # 如果已有执行上下文，也更新它
+        if self._exec_context:
+            self._exec_context.knowledge_hints = hints
+
+        return hints
+
+    def set_knowledge_hints(self, hints: List[str]) -> None:
+        """直接设置知识库操作提示"""
+        self.agent_config.knowledge_hints = hints
+        if self._exec_context:
+            self._exec_context.knowledge_hints = hints
 
     def _execute_step(
         self, user_prompt: str | None = None, is_first: bool = False

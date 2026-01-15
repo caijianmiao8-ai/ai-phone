@@ -177,6 +177,40 @@ def test_no_false_positive():
     print("✓ 测试通过\n")
 
 
+def test_knowledge_hints():
+    """测试：知识库提取与注入"""
+    print("=" * 50)
+    print("测试7: 知识库提取与注入")
+    print("=" * 50)
+
+    ctx = ExecutionContext(task="刷抖音10分钟", max_steps=50)
+
+    # 模拟知识库内容
+    knowledge_content = """抖音使用操作指南：
+1. 打开抖音APP
+2. 上滑切换下一个视频
+3. 双击屏幕点赞
+4. 点击右侧评论图标发评论
+5. 长按收藏视频
+"""
+
+    # 提取操作提示
+    hints = ctx.extract_knowledge_hints(knowledge_content)
+    print(f"知识库内容: {knowledge_content[:50]}...")
+    print(f"提取的操作提示: {hints}")
+
+    assert len(hints) > 0, "应该提取到操作提示"
+
+    # 设置并验证任务状态包含提示
+    ctx.knowledge_hints = hints
+    ctx.step_count = 3
+    state = ctx.build_task_state()
+    print(f"任务状态包含操作提示: {'【操作提示】' in state}")
+
+    assert "【操作提示】" in state, "任务状态应该包含操作提示"
+    print("✓ 测试通过\n")
+
+
 if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("Agent-V2 新功能测试")
@@ -188,6 +222,7 @@ if __name__ == "__main__":
     test_milestone_extraction()
     test_task_state_building()
     test_no_false_positive()
+    test_knowledge_hints()
 
     print("=" * 50)
     print("🎉 所有测试通过!")
