@@ -5,7 +5,7 @@ import json
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List
 
 from phone_agent.actions import ActionHandler
 from phone_agent.actions.handler import do, finish, parse_action
@@ -468,14 +468,18 @@ class PhoneAgent:
             screenshot_after = device_factory.get_screenshot(self.agent_config.device_id)
             screen_hash_after = compute_screen_hash(screenshot_after.base64_data)
 
+            # 先判断是否变化（在更新之前）
+            screen_changed = (self._last_screen_hash != screen_hash_after)
+
             if self._exec_context:
                 self._exec_context.record_action(action, self._last_screen_hash, screen_hash_after)
 
+            # 更新哈希
             self._last_screen_hash = screen_hash_after
 
             # 打印操作结果
             if self.agent_config.verbose:
-                if self._last_screen_hash != screen_hash_after:
+                if screen_changed:
                     print("✓ 屏幕已更新")
                 else:
                     print("✗ 屏幕无变化")
