@@ -158,11 +158,11 @@ class ExecutionContext:
                 return self.loop_warning
 
         # 检测3：状态循环（回到之前的屏幕）
-        if len(self.action_history) >= 2:
+        if len(self.action_history) >= 6:
             current_hash = self.action_history[-1].screen_hash_after
-            # 检查是否回到了5步之前出现过的状态
-            for i, record in enumerate(self.action_history[:-5]):
-                if record.screen_hash_after == current_hash:
+            # 检查是否回到了5步之前出现过的状态（检查 before 和 after）
+            for record in self.action_history[:-5]:
+                if record.screen_hash_before == current_hash or record.screen_hash_after == current_hash:
                     self.loop_warning = f"⚠️【循环警告】当前屏幕状态与第 {record.step_id} 步相同，可能在原地循环"
                     return self.loop_warning
 
